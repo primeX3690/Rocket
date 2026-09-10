@@ -1,0 +1,188 @@
+# AscentGNC — Launch-Vehicle Ascent Guidance, Navigation & Control Stack
+
+Zero-cost, CPU-only, dependency-minimal launch-vehicle ascent GNC stack.
+Companion project to AstroEvo (satellite mission planning) — this one
+covers the rocket/launch-vehicle side: propulsion, guidance, navigation,
+control, fault-tolerance, 6DOF dynamics, and full-mission simulation.
+
+124 automated tests passing across 13 modules.
+
+## Folder structure
+
+```
+ascent-gnc/
+├── propulsion/
+│   └── rocket_equation.py       # Tsiolkovsky, multi-stage delta-V budgeting, nozzle Isp/thrust
+├── guidance/
+│   ├── atmosphere.py            # US Standard Atmosphere 1976 (density, pressure, dynamic pressure)
+│   ├── gravity_turn.py          # 2D ascent integrator + open-loop gravity-turn guidance, max-Q tracking
+│   ├── peg.py                   # Powered Explicit Guidance — closed-loop orbit-insertion (Apollo/Shuttle heritage)
+│   ├── engine_out.py            # Abort-to-Orbit-style engine-out contingency replanning
+│   └── anomaly_arbitration.py   # Sensor-fault graceful degradation (fixes the SSLV-D1 failure mode)
+├── navigation/
+│   └── state_estimation.py      # IMU dead-reckoning + Extended Kalman Filter fusion
+├── control/
+│   └── tvc_attitude.py          # Thrust Vector Control gimbal loop, analytically-tuned PID
+├── dynamics/
+│   └── six_dof.py               # Full 6DOF quaternion-based rigid-body dynamics
+├── faults/
+│   └── real_world.py            # Actuator lag/rate-limits, sensor latency, wind-gust models + compensation
+├── analysis/
+│   ├── monte_carlo.py           # Dispersion/reliability analysis, closed-loop vs open-loop comparison
+│   └── mission_profile.py       # Full stage1 -> coast -> stage2 -> orbit-insertion mission chain
+├── data/
+│   └── reference_missions.py    # Public PSLV-class order-of-magnitude parameters for plausibility checks
+├── visualization/
+│   ├── plots.py                 # Matplotlib static plot generators (ascent, PEG, Monte Carlo, 6DOF, etc.)
+│   └── output/                  # Pre-generated PNG plots (already included)
+├── tests/                       # 124 automated tests — one file per module, all runnable standalone
+├── app.py                       # Interactive Streamlit dashboard (all modules, live sliders)
+├── requirements.txt
+└── README.md                    # This file
+```
+
+## Environment setup
+
+Requires Python 3.9+ (tested on 3.12). No GPU needed — runs fine on a
+Ryzen 3 / 8GB RAM laptop.
+
+```bash
+# 1. Extract the zip and enter the project
+unzip ascent-gnc.zip
+cd ascent-gnc
+
+# 2. (Recommended) create a virtual environment
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 3. Install dependencies (numpy, matplotlib, streamlit)
+pip install -r requirements.txt
+```
+
+`requirements.txt` contains:
+```
+numpy>=1.24
+matplotlib>=3.7
+streamlit>=1.30
+```
+
+## Running the tests
+
+Every test file is self-contained and runnable directly with `python3`
+— no pytest required. Run from the `ascent-gnc/` project root.
+
+**Run all 124 tests at once:**
+```bash
+for f in tests/test_*.py; do python3 "$f"; done
+```
+
+**Run one module's tests individually:**
+```bash
+python3 tests/test_propulsion.py           # 12 tests
+python3 tests/test_atmosphere.py           # 10 tests
+python3 tests/test_gravity_turn.py         # 11 tests
+python3 tests/test_navigation.py           # 7 tests
+python3 tests/test_control.py              # 9 tests
+python3 tests/test_peg.py                  # 8 tests
+python3 tests/test_monte_carlo.py          # 6 tests
+python3 tests/test_engine_out.py           # 11 tests
+python3 tests/test_mission_profile.py      # 14 tests
+python3 tests/test_six_dof.py              # 11 tests
+python3 tests/test_real_world.py           # 10 tests
+python3 tests/test_visualization.py        # 5 tests
+python3 tests/test_anomaly_arbitration.py  # 10 tests
+```
+
+Each file ends with a line like `X passed, 0 failed out of X`.
+
+## Running the interactive dashboard
+
+```bash
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501` in your browser. Four tabs: ascent
+profile, PEG insertion + engine-out contingency (toggle a failure live),
+Monte Carlo dispersion comparison, and a 6DOF 3D trajectory with thrust
+sliders.
+
+## Regenerating the static plots
+
+Plots are already included in `visualization/output/`, but you can
+regenerate or create new ones:
+
+```bash
+python3 -c "
+from guidance.gravity_turn import simulate_ascent
+from visualization.plots import plot_ascent_profile
+
+result = simulate_ascent(m0_kg=50000, m_dry_kg=6000, thrust_n=1200000, isp_s=280,
+                          drag_coeff=0.3, ref_area_m2=2.5, kick_altitude_m=1000, kick_angle_deg=2.0)
+plot_ascent_profile(result, 'visualization/output/ascent_profile.png')
+print('Saved!')
+"
+```
+
+See `visualization/plots.py` for the other plot functions
+(`plot_peg_insertion`, `plot_monte_carlo_comparison`,
+`plot_six_dof_3d_trajectory`, `plot_realistic_vs_ideal_attitude`).
+
+## Using the modules directly
+
+```python
+# Multi-stage delta-V budget
+from propulsion.rocket_equation import Stage, stage_dv_budget
+s1 = Stage("Stage-1", m_prop=20000, m_struct=2000, isp_s=280.0)
+s2 = Stage("Stage-2", m_prop=3000, m_struct=500, isp_s=340.0)
+result = stage_dv_budget([s1, s2], payload_mass=200.0)
+print(result["total_dv_m_s"])
+
+# Gravity-turn ascent
+from guidance.gravity_turn import simulate_ascent
+traj = simulate_ascent(m0_kg=50000, m_dry_kg=45000, thrust_n=1_200_000, isp_s=280,
+                        drag_coeff=0.3, ref_area_m2=2.0, kick_altitude_m=1000, kick_angle_deg=2.0)
+print("Max-Q:", traj["max_q_pa"], "Pa")
+
+# Closed-loop PEG orbit insertion
+from guidance.peg import PEGTarget, simulate_peg_guided_burn
+import numpy as np
+R_EARTH, MU_EARTH = 6378137.0, 3.986004418e14
+target_r = R_EARTH + 300000
+target = PEGTarget(target_r, np.sqrt(MU_EARTH/target_r), 0.0)
+peg_result = simulate_peg_guided_burn(r0_m=R_EARTH+180000, v0_m_s=7300, gamma0_rad=np.radians(3.0),
+                                       m0_kg=4000, thrust_n=90000, isp_s=320, target=target)
+print("Insertion error:", peg_result["insertion_error"])
+
+# SSLV-D1-style failure vs graceful degradation (the anomaly-arbitration fix)
+from guidance.anomaly_arbitration import compare_sslv_failure_mode_vs_graceful_degradation
+comparison = compare_sslv_failure_mode_vs_graceful_degradation(
+    r0_m=R_EARTH+180000, v0_m_s=7300, gamma0_rad=np.radians(3.0),
+    m0_kg=4000, m_dry_kg=1500, thrust_n=90000, isp_s=320, target=target,
+    anomaly_start_s=5.0,
+)
+print("Fallback error:", comparison["sslv_style_fallback"]["velocity_error_m_s"])
+print("Graceful error:", comparison["graceful_degradation"]["velocity_error_m_s"])
+```
+
+No package install needed — just run scripts from the `ascent-gnc/`
+root directory (imports are relative to the project root).
+
+## Module summary
+
+| Module | What it does | Tests |
+|---|---|---|
+| `propulsion/rocket_equation.py` | Delta-V budgeting, nozzle performance | 12 |
+| `guidance/atmosphere.py` | Standard atmosphere model | 10 |
+| `guidance/gravity_turn.py` | Open-loop ascent + max-Q tracking | 11 |
+| `navigation/state_estimation.py` | IMU + EKF fusion | 7 |
+| `control/tvc_attitude.py` | TVC gimbal PID control | 9 |
+| `guidance/peg.py` | Closed-loop orbit insertion | 8 |
+| `analysis/monte_carlo.py` | Dispersion/reliability analysis | 6 |
+| `guidance/engine_out.py` | Engine-out contingency replanning | 11 |
+| `analysis/mission_profile.py` | Full multi-stage mission | 14 |
+| `dynamics/six_dof.py` | 6DOF quaternion rigid-body dynamics | 11 |
+| `faults/real_world.py` | Actuator/sensor/wind realism | 10 |
+| `visualization/plots.py` | Static plot generation | 5 |
+| `guidance/anomaly_arbitration.py` | SSLV-D1 failure-mode fix | 10 |
+| **Total** | | **124** |
+
