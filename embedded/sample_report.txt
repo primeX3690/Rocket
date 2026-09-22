@@ -1,0 +1,37 @@
+Total instructions traced (whole run, incl. boot+printf): 1,043,936
+Instructions attributable to the control loop's 600 calls: 1,021,831
+  -> average 1703.1 ARM Thumb-2 instructions per control-loop iteration
+
+Breakdown (top contributors):
+  __aeabi_fsub                  331,031  ( 551.7/iter)
+  __divsf3                      239,520  ( 399.2/iter)
+  __mulsf3                      172,031  ( 286.7/iter)
+  __cmpsf2                      104,643  ( 174.4/iter)
+  pid_update                     32,396  (  54.0/iter)
+  __aeabi_cfcmpeq                29,898  (  49.8/iter)
+  actuator_step                  25,270  (  42.1/iter)
+  run_iteration.constprop.0      19,800  (  33.0/iter)
+  __aeabi_fcmplt                 18,198  (  30.3/iter)
+  dynamics_step                  15,600  (  26.0/iter)
+  one_minus_cosine_gust          13,944  (  23.2/iter)
+  __aeabi_fcmpgt                 11,700  (  19.5/iter)
+  __aeabi_cfrcmple                7,800  (  13.0/iter)
+
+Note: this target (QEMU lm3s6965evb, Cortex-M3) has NO hardware FPU,
+so every add/sub/mul/div/compare on a float is a soft-float library
+call -- that's why float-helper instructions dominate the count.
+A real STM32F4-class flight computer (Cortex-M4F) has a hardware
+single-precision FPU: the same C code, recompiled with -mfpu=fpv4-sp-d16
+-mfloat-abi=hard, replaces ~90% of these instructions with single-cycle
+FADD/FMUL/FDIV/VCMP instructions -- this measurement is therefore a
+deliberately conservative (worst-case, no-FPU) instruction count.
+
+Estimated on STM32F103 'Blue Pill' (72 MHz, no FPU, Cortex-M3), CPI~1.3:
+  ~2214 cycles/iteration -> ~30.7 us/iteration
+  budget at 50 Hz loop rate: 20000 us
+  timing margin: 99.8% (PASS -- room for >50x faster loop rate)
+
+Estimated on STM32F4-class (168 MHz, assuming no FPU used), CPI~1.3:
+  ~2214 cycles/iteration -> ~13.2 us/iteration
+  budget at 50 Hz loop rate: 20000 us
+  timing margin: 99.9% (PASS -- room for >50x faster loop rate)
