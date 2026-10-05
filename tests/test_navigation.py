@@ -7,7 +7,7 @@ Core claim to verify: pure IMU dead-reckoning drifts unboundedly due to
 bias integration, while EKF fusion with periodic position updates keeps
 error bounded. This is tested against a known synthetic "true" trajectory
 (constant acceleration ascent) so error is exactly measurable — same
-approach as the EKF verification already done in SafeEvo/AstroEvo.
+approach used throughout this project's other test files.
 """
 
 import sys

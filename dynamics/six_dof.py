@@ -27,20 +27,57 @@ this module uses QUATERNIONS, the standard singularity-free attitude
 representation used by every real flight computer.
 
 Reference frames:
-    - Inertial frame (I): fixed, Earth-centered for this module's
-      purposes (flat, non-rotating — rotating-Earth effects are a
-      further extension, not implemented here, and documented as such).
+    - Inertial/nav frame (I): a LOCAL, non-rotating tangent-plane frame
+      anchored near the vehicle at t=0 (z up), good for flight regimes of
+      up to a few hundred km / a few minutes where Earth's curvature and
+      rotation are second-order (matches the scope of this module's
+      verification tests: short free-flight and attitude-control cases).
+      It is NOT truly Earth-centered -- for a full multi-hundred-km
+      ascent-to-orbit in a proper Earth-centered frame, see
+      guidance/peg.py and analysis/mission_profile.py, which use the
+      polar (r, v, gamma) representation with inverse-square gravity.
     - Body frame (B): fixed to the vehicle, x-axis along the thrust
       centerline.
     Attitude quaternion q rotates vectors from body frame to inertial
     frame.
 
+Gravity defaults to a constant vector (flat-frame approximation, valid
+at this module's altitude/time scale) but also accepts an
+inverse-square gravity model (`gravity_inverse_square`) for longer or
+higher-altitude runs. Aerodynamic drag (`aero_drag_force`) can be added
+via the optional `aero_func` hook using guidance/atmosphere.py.
+
 Zero external dependencies beyond NumPy — CPU-only.
 """
 
 import numpy as np
+from guidance.atmosphere import density
 
 G0 = 9.80665
+R_EARTH = 6378137.0
+MU_EARTH = 3.986004418e14
+
+
+def gravity_inverse_square(r_inertial, origin_altitude_m=0.0):
+    """
+    Inverse-square gravity vector for a position in this module's local
+    tangent-plane frame, where r_inertial[2] is altitude above the frame
+    origin (which itself sits at `origin_altitude_m` above the surface).
+    """
+    altitude = origin_altitude_m + r_inertial[2]
+    radius = R_EARTH + altitude
+    g_mag = MU_EARTH / radius ** 2
+    return np.array([0.0, 0.0, -g_mag])
+
+
+def aero_drag_force(v_inertial, altitude_m, drag_coeff, ref_area_m2):
+    """Drag force (inertial frame, opposing velocity) from guidance/atmosphere.py density."""
+    speed = np.linalg.norm(v_inertial)
+    if speed < 1e-9:
+        return np.zeros(3)
+    rho = density(max(altitude_m, 0.0))
+    drag_mag = 0.5 * rho * speed ** 2 * drag_coeff * ref_area_m2
+    return -drag_mag * v_inertial / speed
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +168,7 @@ class InertiaTensor:
 
 def six_dof_derivatives(state: SixDOFState, inertia: InertiaTensor,
                          thrust_body_n: np.ndarray, torque_body_nm: np.ndarray,
-                         mdot_kg_s: float, gravity_inertial: np.ndarray):
+                         mdot_kg_s: float, gravity_inertial, drag_force_inertial=None):
     """
     Compute the full 6DOF state derivative:
         dr/dt     = v
@@ -153,8 +190,11 @@ def six_dof_derivatives(state: SixDOFState, inertia: InertiaTensor,
     R = quat_to_rotation_matrix(state.q)
     thrust_inertial = R @ thrust_body_n
 
+    g_vec = gravity_inertial(state.r) if callable(gravity_inertial) else gravity_inertial
+    drag = np.zeros(3) if drag_force_inertial is None else drag_force_inertial
+
     dr_dt = state.v
-    dv_dt = thrust_inertial / state.m + gravity_inertial
+    dv_dt = (thrust_inertial + drag) / state.m + g_vec
     dq_dt = quat_derivative(state.q, state.omega)
 
     gyroscopic_term = np.cross(state.omega, inertia.I @ state.omega)
@@ -167,14 +207,14 @@ def six_dof_derivatives(state: SixDOFState, inertia: InertiaTensor,
 
 def integrate_six_dof(state: SixDOFState, inertia: InertiaTensor,
                        thrust_body_n, torque_body_nm, mdot_kg_s,
-                       gravity_inertial, dt: float):
-    """One explicit-Euler integration step, with quaternion re-normalization
-    (required every step — integrating the quaternion derivative alone
-    slowly drifts off the unit-norm constraint, a well-known numerical
-    issue that every real attitude-estimation/propagation system
-    corrects for exactly this way)."""
+                       gravity_inertial, dt: float, drag_force_inertial=None):
+    """One explicit-Euler integration step (kept for backward compatibility /
+    comparison; `integrate_six_dof_rk4` is used by default in
+    `simulate_six_dof_free_flight` for better accuracy). Quaternion is
+    re-normalized every step (integrating the quaternion derivative alone
+    slowly drifts off the unit-norm constraint)."""
     dr, dv, dq, domega, dm = six_dof_derivatives(
-        state, inertia, thrust_body_n, torque_body_nm, mdot_kg_s, gravity_inertial
+        state, inertia, thrust_body_n, torque_body_nm, mdot_kg_s, gravity_inertial, drag_force_inertial
     )
 
     state.r = state.r + dr * dt
@@ -186,11 +226,54 @@ def integrate_six_dof(state: SixDOFState, inertia: InertiaTensor,
     return state
 
 
+def integrate_six_dof_rk4(state: SixDOFState, inertia: InertiaTensor,
+                          thrust_body_n, torque_body_nm, mdot_kg_s,
+                          gravity_inertial, dt: float, drag_force_func=None):
+    """
+    RK4 integration step (translational + rotational + mass), with
+    quaternion re-normalization each stage (a standard, small
+    approximation for quaternion RK4 -- exact geometric integrators exist
+    but are not needed at this module's timestep/duration scale).
+    `drag_force_func(state) -> 3-vector` lets the caller add
+    velocity/altitude-dependent aerodynamic drag (see `aero_drag_force`).
+    """
+    def deriv(s):
+        drag = drag_force_func(s) if drag_force_func is not None else None
+        return six_dof_derivatives(s, inertia, thrust_body_n, torque_body_nm,
+                                   mdot_kg_s, gravity_inertial, drag)
+
+    def stage(r, v, q, omega, m):
+        return SixDOFState(r, v, q, omega, max(m, 1e-6))
+
+    k1 = deriv(state)
+    s2 = stage(state.r + 0.5 * dt * k1[0], state.v + 0.5 * dt * k1[1],
+              state.q + 0.5 * dt * k1[2], state.omega + 0.5 * dt * k1[3],
+              state.m + 0.5 * dt * k1[4])
+    k2 = deriv(s2)
+    s3 = stage(state.r + 0.5 * dt * k2[0], state.v + 0.5 * dt * k2[1],
+              state.q + 0.5 * dt * k2[2], state.omega + 0.5 * dt * k2[3],
+              state.m + 0.5 * dt * k2[4])
+    k3 = deriv(s3)
+    s4 = stage(state.r + dt * k3[0], state.v + dt * k3[1],
+              state.q + dt * k3[2], state.omega + dt * k3[3],
+              state.m + dt * k3[4])
+    k4 = deriv(s4)
+
+    state.r = state.r + dt / 6.0 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+    state.v = state.v + dt / 6.0 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+    state.q = quat_normalize(state.q + dt / 6.0 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]))
+    state.omega = state.omega + dt / 6.0 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3])
+    state.m = state.m - mdot_kg_s * dt
+
+    return state
+
+
 def simulate_six_dof_free_flight(
     initial_state: SixDOFState, inertia: InertiaTensor,
     thrust_body_n_func, torque_body_nm_func, mdot_kg_s: float,
     gravity_inertial=np.array([0.0, 0.0, -9.80665]),
     dt: float = 0.02, t_max: float = 20.0,
+    integrator: str = "rk4", drag_func=None,
 ):
     """
     Propagate a full 6DOF trajectory. thrust_body_n_func(t, state) and
@@ -198,6 +281,12 @@ def simulate_six_dof_free_flight(
     logic can command thrust direction and torques as a function of
     time and current state (closed-loop capable, same pattern as the
     rest of this stack).
+
+    gravity_inertial: a constant 3-vector, OR a callable(r) -> 3-vector
+        (e.g. `gravity_inverse_square`) for a non-flat gravity model.
+    drag_func: optional callable(state) -> 3-vector inertial-frame drag
+        force (e.g. via `aero_drag_force`).
+    integrator: "rk4" (default) or "euler" (kept for comparison/tests).
     """
     n_steps = int(t_max / dt)
     t_hist = np.zeros(n_steps)
@@ -213,8 +302,13 @@ def simulate_six_dof_free_flight(
         thrust_body = thrust_body_n_func(t, state)
         torque_body = torque_body_nm_func(t, state)
 
-        state = integrate_six_dof(state, inertia, thrust_body, torque_body,
-                                   mdot_kg_s, gravity_inertial, dt)
+        if integrator == "euler":
+            drag = drag_func(state) if drag_func is not None else None
+            state = integrate_six_dof(state, inertia, thrust_body, torque_body,
+                                      mdot_kg_s, gravity_inertial, dt, drag)
+        else:
+            state = integrate_six_dof_rk4(state, inertia, thrust_body, torque_body,
+                                          mdot_kg_s, gravity_inertial, dt, drag_func)
 
         t_hist[i] = t
         pos_hist[i] = state.r

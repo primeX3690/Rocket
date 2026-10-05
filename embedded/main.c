@@ -23,7 +23,7 @@
  * target *instruction set architecture*, before ever touching a
  * physical board. Full HIL (real STM32/RP2040 silicon in the loop
  * over UART/SPI with actual sensor hardware) is the next rung up
- * and needs physical hardware PRIME does not currently have.
+ * and needs physical hardware this project does not currently have.
  */
 
 #include "pid_controller.h"

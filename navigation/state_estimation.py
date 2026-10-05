@@ -75,7 +75,7 @@ class AscentEKF:
     State vector: [position, velocity, accel_bias]
     Process model: constant-bias IMU propagation (standard INS error-state
                     formulation, simplified to a direct-state filter here
-                    for clarity — same structure used in SafeEvo's EKF).
+                    for clarity — same structure used in the author's other EKF work).
 
     Prediction step uses IMU acceleration input.
     Update step fuses an external noisy position measurement (proxy for

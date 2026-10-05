@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.so
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+embedded/*.elf
+embedded/*.bin
+embedded/*.o
+embedded/build/
+.DS_Store

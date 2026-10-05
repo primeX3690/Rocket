@@ -129,6 +129,8 @@ See `visualization/plots.py` for the other plot functions
 
 ## Using the modules directly
 
+
+
 ```python
 # Multi-stage delta-V budget
 from propulsion.rocket_equation import Stage, stage_dv_budget
@@ -163,6 +165,8 @@ comparison = compare_sslv_failure_mode_vs_graceful_degradation(
 print("Fallback error:", comparison["sslv_style_fallback"]["velocity_error_m_s"])
 print("Graceful error:", comparison["graceful_degradation"]["velocity_error_m_s"])
 ```
+
+
 
 No package install needed — just run scripts from the `ascent-gnc/`
 root directory (imports are relative to the project root).

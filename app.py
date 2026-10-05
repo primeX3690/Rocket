@@ -40,17 +40,26 @@ st.caption("Closed-loop ascent guidance stack — PEG insertion, Monte Carlo dis
 # ---------------------------------------------------------------------------
 st.sidebar.header("Vehicle Parameters")
 
-m0 = st.sidebar.slider("Stage-1 initial mass (kg)", 20000, 100000, 50000, step=1000)
-m_dry1 = st.sidebar.slider("Stage-1 dry mass (kg)", 3000, 15000, 6000, step=500)
-thrust1 = st.sidebar.slider("Stage-1 thrust (kN)", 500, 3000, 1200, step=50) * 1000
-isp1 = st.sidebar.slider("Stage-1 Isp (s)", 220, 320, 280, step=5)
+st.sidebar.caption("Defaults below match data/reference_vehicle.py — a design chosen "
+                   "so the full mission actually converges to the target orbit. "
+                   "Moving sliders far from these is not guaranteed to converge — "
+                   "see guidance/peg.py's docstring on solver limitations.")
+m0 = st.sidebar.slider("Stage-1 initial mass (kg)", 20000, 100000, 60000, step=1000)
+m_dry1 = st.sidebar.slider("Stage-1 dry mass (kg)", 3000, 20000, 12000, step=500)
+thrust1 = st.sidebar.slider("Stage-1 thrust (kN)", 500, 1500, 850, step=25) * 1000
+isp1 = st.sidebar.slider("Stage-1 Isp (s)", 220, 320, 285, step=5)
 kick_alt = st.sidebar.slider("Gravity-turn kick altitude (m)", 200, 3000, 1000, step=100)
-kick_angle = st.sidebar.slider("Kick angle (deg)", 0.5, 5.0, 2.0, step=0.1)
+kick_angle = st.sidebar.slider("Kick angle (deg)", 0.5, 10.0, 6.0, step=0.1)
+launch_lat = st.sidebar.slider("Launch latitude (deg)", 0.0, 45.0, 13.7, step=0.5)
+mach_drag = st.sidebar.checkbox("Mach-dependent drag rise", value=True)
 
 st.sidebar.header("Stage-2 / Insertion")
-m0_s2 = st.sidebar.slider("Stage-2 initial mass (kg)", 2000, 10000, 4000, step=200)
-thrust2 = st.sidebar.slider("Stage-2 thrust (kN)", 20, 200, 90, step=5) * 1000
-isp2 = st.sidebar.slider("Stage-2 Isp (s)", 280, 460, 320, step=5)
+m0_s2 = st.sidebar.slider("Stage-2 initial mass (kg)", 2000, 20000, 15000, step=200)
+stage2_dry_frac = st.sidebar.slider("Stage-2 dry-mass fraction", 0.1, 0.5, 0.167, step=0.01,
+                                    help="Fraction of stage-2 initial mass that is structure "
+                                         "(not propellant) — sets the propellant floor.")
+thrust2 = st.sidebar.slider("Stage-2 thrust (kN)", 20, 300, 220, step=5) * 1000
+isp2 = st.sidebar.slider("Stage-2 Isp (s)", 280, 460, 340, step=5)
 target_alt_km = st.sidebar.slider("Target orbit altitude (km)", 200, 800, 300, step=25)
 
 st.sidebar.header("Engine-Out Scenario")
@@ -73,6 +82,7 @@ with tab1:
         m0_kg=m0, m_dry_kg=m_dry1, thrust_n=thrust1, isp_s=isp1,
         drag_coeff=0.3, ref_area_m2=2.5,
         kick_altitude_m=kick_alt, kick_angle_deg=kick_angle,
+        mach_dependent_drag=mach_drag, launch_latitude_deg=launch_lat,
     )
 
     col1, col2, col3 = st.columns(3)
@@ -106,12 +116,15 @@ with tab2:
 
     r0 = R_EARTH + ascent["burnout_altitude_m"]
     v0 = ascent["burnout_speed_m_s"]
-    gamma0 = np.radians(90.0 - kick_angle * 3)  # rough post-ascent flight path angle estimate
+    # Actual stage-1 burnout flight-path angle from its own inertial vx/vy —
+    # not an approximation, unlike an earlier version of this file.
+    gamma0 = float(np.arctan2(ascent["burnout_vy_m_s"], ascent["burnout_vx_m_s"]))
+    stage2_m_dry = m0_s2 * stage2_dry_frac
 
     if enable_failure:
         failure = EngineOutEvent(time_s=failure_time, thrust_fraction_remaining=thrust_fraction)
         result = simulate_burn_with_engine_out(
-            r0_m=r0, v0_m_s=v0, gamma0_rad=gamma0, m0_kg=m0_s2, m_dry_kg=m0_s2 * 0.3,
+            r0_m=r0, v0_m_s=v0, gamma0_rad=gamma0, m0_kg=m0_s2, m_dry_kg=stage2_m_dry,
             nominal_thrust_n=thrust2, isp_s=isp2, nominal_target=target,
             engine_out=failure,
         )
@@ -171,13 +184,15 @@ with tab3:
     target = PEGTarget(target_r, target_v, 0.0)
     r0 = R_EARTH + ascent["burnout_altitude_m"]
     v0 = ascent["burnout_speed_m_s"]
-    gamma0 = np.radians(90.0 - kick_angle * 3)
+    gamma0 = float(np.arctan2(ascent["burnout_vy_m_s"], ascent["burnout_vx_m_s"]))
 
     with st.spinner(f"Running {n_trials} Monte Carlo trials..."):
         comparison = compare_open_vs_closed_loop_dispersion(
             nominal_r0_m=r0, nominal_v0_m_s=v0, nominal_gamma0_rad=gamma0,
             nominal_m0_kg=m0_s2, thrust_n=thrust2, nominal_isp_s=isp2, target=target,
-            fixed_chi_deg=-33.3, n_trials=n_trials,
+            n_trials=n_trials,  # fixed_chi_deg defaults to the nominal PEG solve's own first
+                                # commanded angle — "the best open-loop profile you could have
+                                # pre-computed from the nominal plan" (see analysis/monte_carlo.py)
         )
 
     col1, col2, col3 = st.columns(3)
@@ -197,6 +212,42 @@ with tab3:
     ax.grid(alpha=0.3)
     st.pyplot(fig)
     plt.close(fig)
+
+    st.markdown("#### Dispersion Scatter, CEP & Sensitivity")
+    from analysis.dispersion_analysis import circular_error_probable, dispersion_ellipse, sensitivity_heatmap_data
+
+    radius_err_km = comparison["closed_loop_radius_error_m"] / 1000.0
+    vel_err = comparison["closed_loop_velocity_error_m_s"]
+    cep50 = circular_error_probable(radius_err_km, vel_err, 50.0)
+    cep90 = circular_error_probable(radius_err_km, vel_err, 90.0)
+    ellipse = dispersion_ellipse(radius_err_km, vel_err, confidence=0.95)
+
+    col1, col2 = st.columns(2)
+    col1.metric("CEP50 (closed-loop)", f"{cep50:.3f} (km, m/s units)")
+    col2.metric("CEP90 (closed-loop)", f"{cep90:.3f} (km, m/s units)")
+
+    fig2, ax2 = plt.subplots(figsize=(7, 6))
+    ax2.scatter(radius_err_km, vel_err, s=8, alpha=0.4, color="#1f6feb", label="Closed-loop trials")
+    ax2.plot(ellipse["boundary_points"][:, 0], ellipse["boundary_points"][:, 1],
+            color="#f0883e", linewidth=2, label="95% dispersion ellipse")
+    ax2.scatter(*ellipse["center"], color="red", marker="+", s=100, label="Mean miss")
+    ax2.set_xlabel("Radius error (km)")
+    ax2.set_ylabel("Velocity error (m/s)")
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    ax2.set_aspect("auto")
+    st.pyplot(fig2)
+    plt.close(fig2)
+
+    heat = sensitivity_heatmap_data(
+        {"radius_error_m": comparison["closed_loop_radius_error_m"],
+         "velocity_error_m_s": comparison["closed_loop_velocity_error_m_s"]},
+        {"velocity_error (proxy for dispersed v0)": comparison["closed_loop_velocity_error_m_s"]},
+    )
+    st.caption("Full parameter-level sensitivity (vs the dispersed v0/gamma0/mass/Isp inputs) "
+              "is available via analysis/dispersion_analysis.py's sensitivity_heatmap_data() "
+              "when called directly with the dispersed input arrays — this dashboard view shows "
+              "the output-output relationship as a lightweight example.")
 
 # --- Tab 4: 6DOF ---
 with tab4:
@@ -236,5 +287,5 @@ with tab4:
     st.metric("Final Speed", f"{speed[-1]:.0f} m/s")
 
 st.markdown("---")
-st.caption("114/114 automated tests passing across 12 modules. "
-           "Zero-cost, CPU-only — Python + NumPy + Matplotlib only.")
+st.caption("180/180 automated tests passing across 19 physics/guidance/nav modules "
+           "(run_all_tests.py). Zero-cost, CPU-only — Python + NumPy + Matplotlib + Streamlit.")

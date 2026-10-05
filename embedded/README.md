@@ -14,7 +14,7 @@ actuator/wind-gust model from `faults/real_world.py`) to C, cross-
 compiles it for the **real ARM Cortex-M3 instruction set**
 (`arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb`), and runs the compiled
 binary under **QEMU's cycle-level ARM core emulation**
-(`qemu-system-arm -M lm3s6965evb`) -- not a physical board (PRIME
+(`qemu-system-arm -M lm3s6965evb`) -- not a physical board (this project
 doesn't have one yet), but the actual target CPU architecture and
 instruction set, which is the part that determines timing.
 
@@ -75,8 +75,8 @@ explicitly rather than hidden.
   estimate" is not the same claim as "measured on hardware."
 - **Real HIL** -- an actual STM32/RP2040 board wired to a real IMU,
   running this exact control loop against live sensor data over
-  UART/SPI -- is the next rung up, and needs physical hardware PRIME
-  does not currently have. This SIL harness is the legitimate,
+  UART/SPI -- is the next rung up, and needs physical hardware this
+  project does not currently have. This SIL harness is the legitimate,
   honest, fully-reproducible-on-a-laptop step below that, not a
   substitute for it.
 

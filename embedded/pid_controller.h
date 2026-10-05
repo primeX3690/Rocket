@@ -18,6 +18,7 @@ typedef struct {
     float integral;
     float prev_error;
     float output_limit;
+    float integral_limit;
     int has_prev;
 } PIDController;
 

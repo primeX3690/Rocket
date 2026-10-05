@@ -43,7 +43,7 @@ Bosch BMI088 (6-axis, SPI/I2C, ~$8, drone/robotics-grade, vibration-robust)
   - Accelerometer noise density: 175 ug/sqrt(Hz) (typ, +-24g range)
   - Gyroscope noise density: 0.014 deg/s/sqrt(Hz)
   - Gyroscope bias instability: < 2 deg/hr (automotive-grade gyro die)
-  This is the realistic "if PRIME had a bit more budget" upgrade path
+  This is the realistic "if this project had a bit more budget" upgrade path
   from the MPU-6050 -- genuinely used on real multirotor flight
   controllers (Pixhawk/Cube family).
 

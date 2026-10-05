@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AscentGNC Platform</title>
+<style>
+  :root {
+    --bg: #0a0e14; --panel: #131922; --border: #22303f; --text: #e6edf3;
+    --accent: #3fb6ff; --accent2: #22c55e; --danger: #ef4444; --muted: #8b98a5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; }
+  header h1 span { color: var(--accent); }
+  #userbar { font-size: 13px; color: var(--muted); display: flex; gap: 14px; align-items: center; }
+  #userbar button { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 5px 12px; border-radius: 5px; cursor: pointer; }
+  main { max-width: 1000px; margin: 0 auto; padding: 28px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 22px; margin-bottom: 20px; }
+  .card h2 { margin-top: 0; font-size: 15px; color: var(--accent); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; padding: 9px 11px; border-radius: 6px; border: 1px solid var(--border); background: #0d1320; color: var(--text); font-size: 14px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  button.primary { background: var(--accent); color: #041018; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+  button.primary:hover { opacity: 0.9; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  pre { background: #0d1320; border: 1px solid var(--border); border-radius: 6px; padding: 14px; overflow-x: auto; font-size: 12.5px; margin-top: 14px; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 10px; }
+  .success { color: var(--accent2); font-size: 13px; margin-top: 10px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+  .tab { padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--muted); }
+  .tab.active { background: var(--accent); color: #041018; border-color: var(--accent); font-weight: 600; }
+  .hidden { display: none; }
+  .auth-box { max-width: 380px; margin: 60px auto; }
+  .switch-link { font-size: 13px; color: var(--accent); cursor: pointer; margin-top: 12px; display: inline-block; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: #0d1320; border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Ascent<span>GNC</span> Platform</h1>
+  <div id="userbar"></div>
+</header>
+
+<main>
+  <div id="authView" class="auth-box card">
+    <h2 id="authTitle">Log in</h2>
+    <div id="signupFields" class="hidden">
+      <label>Organization name</label>
+      <input id="orgName" placeholder="Your Rocket Co">
+    </div>
+    <label>Email</label>
+    <input id="email" type="email" placeholder="you@company.com">
+    <label>Password</label>
+    <input id="password" type="password" placeholder="At least 8 characters">
+    <button class="primary" id="authSubmit">Log in</button>
+    <div id="authError" class="error"></div>
+    <div class="switch-link" id="authSwitch">Need an account? Sign up</div>
+  </div>
+
+  <div id="appView" class="hidden">
+    <div class="tabs">
+      <div class="tab active" data-tab="reference">Reference Mission</div>
+      <div class="tab" data-tab="peg">PEG Insertion</div>
+      <div class="tab" data-tab="anomaly">SSLV-D1 Anomaly Case</div>
+      <div class="tab" data-tab="montecarlo">Monte Carlo</div>
+      <div class="tab" data-tab="apikeys">API Keys</div>
+      <div class="tab" data-tab="usage">Usage &amp; Billing</div>
+    </div>
+
+    <div id="panel-reference" class="card panel">
+      <h2>Reference Mission (guaranteed-convergent demo)</h2>
+      <p style="color:var(--muted); font-size:13px;">Runs the full two-stage ascent-to-orbit mission from
+         data/reference_vehicle.py — no parameters needed, this is the flagship "it works end to end" demo.</p>
+      <button class="primary" onclick="runSim('reference')">Run Mission</button>
+      <pre id="out-reference"></pre>
+    </div>
+
+    <div id="panel-peg" class="card panel hidden">
+      <h2>PEG Closed-Loop Orbit Insertion</h2>
+      <div class="row">
+        <div><label>Ignition altitude (km)</label><input id="peg-r0" value="180"></div>
+        <div><label>Ignition speed (m/s)</label><input id="peg-v0" value="7300"></div>
+        <div><label>Flight-path angle (deg)</label><input id="peg-gamma" value="3.0"></div>
+        <div><label>Stage mass (kg)</label><input id="peg-m0" value="4000"></div>
+        <div><label>Thrust (N)</label><input id="peg-thrust" value="90000"></div>
+        <div><label>Isp (s)</label><input id="peg-isp" value="320"></div>
+        <div><label>Target orbit altitude (km)</label><input id="peg-target" value="300"></div>
+      </div>
+      <button class="primary" onclick="runSim('peg')">Run PEG Insertion</button>
+      <pre id="out-peg"></pre>
+    </div>
+
+    <div id="panel-anomaly" class="card panel hidden">
+      <h2>SSLV-D1-Style Sensor Anomaly: Fallback vs Graceful Degradation</h2>
+      <p style="color:var(--muted); font-size:13px;">Reproduces the real, publicly-documented ISRO SSLV-D1
+         failure mode (a transient accelerometer fault triggering a permanent full open-loop fallback) and
+         compares it against isolating only the bad samples while staying closed-loop.</p>
+      <div class="row">
+        <div><label>Target orbit altitude (km)</label><input id="an-target" value="356.2"></div>
+        <div><label>Anomaly onset time (s)</label><input id="an-onset" value="5.0"></div>
+      </div>
+      <button class="primary" onclick="runSim('anomaly')">Run Comparison</button>
+      <pre id="out-anomaly"></pre>
+    </div>
+
+    <div id="panel-montecarlo" class="card panel hidden">
+      <h2>Monte Carlo Dispersion Analysis</h2>
+      <div class="row">
+        <div><label>Number of trials (10-300)</label><input id="mc-trials" value="50"></div>
+      </div>
+      <p style="color:var(--muted); font-size:13px;">Larger trial counts take longer — the server caps requests at 300 trials.</p>
+      <button class="primary" onclick="runSim('montecarlo')">Run Monte Carlo</button>
+      <pre id="out-montecarlo"></pre>
+    </div>
+
+    <div id="panel-apikeys" class="card panel hidden">
+      <h2>API Keys</h2>
+      <p style="color:var(--muted); font-size:13px;">Use an API key to call the simulation endpoints
+         programmatically (CI pipelines, scripts) instead of logging in interactively.</p>
+      <label>Key label</label>
+      <input id="newKeyLabel" placeholder="e.g. CI pipeline">
+      <button class="primary" onclick="createApiKey()">Create Key</button>
+      <div id="newKeyDisplay"></div>
+      <h3 style="font-size:13px; color:var(--muted); margin-top:24px;">Existing keys</h3>
+      <div id="apiKeyList"></div>
+    </div>
+
+    <div id="panel-usage" class="card panel hidden">
+      <h2>Usage &amp; Billing</h2>
+      <div id="usageDisplay"></div>
+      <button class="secondary" onclick="loadUsage()">Refresh</button>
+    </div>
+  </div>
+</main>
+
+<script>
+const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:8000' : '';
+let token = localStorage.getItem('agnc_token');
+let isSignup = false;
+
+function headers() {
+  return token ? {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
+               : {'Content-Type': 'application/json'};
+}
+
+async function api(method, path, body) {
+  const res = await fetch(API_BASE + path, {
+    method, headers: headers(), body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+document.getElementById('authSwitch').onclick = () => {
+  isSignup = !isSignup;
+  document.getElementById('signupFields').classList.toggle('hidden', !isSignup);
+  document.getElementById('authTitle').textContent = isSignup ? 'Create account' : 'Log in';
+  document.getElementById('authSubmit').textContent = isSignup ? 'Sign up' : 'Log in';
+  document.getElementById('authSwitch').textContent = isSignup ? 'Already have an account? Log in' : 'Need an account? Sign up';
+};
+
+document.getElementById('authSubmit').onclick = async () => {
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  const errEl = document.getElementById('authError');
+  errEl.textContent = '';
+  try {
+    const body = isSignup ? {org_name: document.getElementById('orgName').value, email, password} : {email, password};
+    const data = await api('POST', isSignup ? '/api/auth/signup' : '/api/auth/login', body);
+    token = data.token;
+    localStorage.setItem('agnc_token', token);
+    await showApp();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+};
+
+async function showApp() {
+  try {
+    const me = await api('GET', '/api/auth/me');
+    document.getElementById('authView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+    document.getElementById('userbar').innerHTML =
+      `<span class="badge">${me.organization.name}</span><span class="badge">${me.organization.plan} plan</span>
+       <span>${me.user.email}</span><button onclick="logout()">Log out</button>`;
+  } catch (e) {
+    token = null;
+    localStorage.removeItem('agnc_token');
+  }
+}
+
+function logout() {
+  token = null;
+  localStorage.removeItem('agnc_token');
+  location.reload();
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.add('hidden'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.remove('hidden');
+    if (tab.dataset.tab === 'apikeys') loadApiKeys();
+    if (tab.dataset.tab === 'usage') loadUsage();
+  };
+});
+
+async function runSim(kind) {
+  const out = document.getElementById('out-' + kind);
+  out.textContent = 'Running...';
+  try {
+    let path, body;
+    if (kind === 'reference') { path = '/api/simulate/reference-mission'; body = {}; }
+    else if (kind === 'peg') {
+      path = '/api/simulate/peg-insertion';
+      body = {
+        r0_alt_km: parseFloat(document.getElementById('peg-r0').value),
+        v0_m_s: parseFloat(document.getElementById('peg-v0').value),
+        gamma0_deg: parseFloat(document.getElementById('peg-gamma').value),
+        m0_kg: parseFloat(document.getElementById('peg-m0').value),
+        thrust_n: parseFloat(document.getElementById('peg-thrust').value),
+        isp_s: parseFloat(document.getElementById('peg-isp').value),
+        target_alt_km: parseFloat(document.getElementById('peg-target').value),
+      };
+    } else if (kind === 'anomaly') {
+      path = '/api/simulate/anomaly-comparison';
+      body = {
+        target_alt_km: parseFloat(document.getElementById('an-target').value),
+        anomaly_start_s: parseFloat(document.getElementById('an-onset').value),
+      };
+    } else if (kind === 'montecarlo') {
+      path = '/api/simulate/monte-carlo';
+      body = {n_trials: parseInt(document.getElementById('mc-trials').value)};
+    }
+    const result = await api('POST', path, body);
+    out.textContent = JSON.stringify(result, null, 2);
+  } catch (e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function createApiKey() {
+  const label = document.getElementById('newKeyLabel').value;
+  const display = document.getElementById('newKeyDisplay');
+  try {
+    const data = await api('POST', '/api/apikeys', {label});
+    display.innerHTML = `<div class="success">Key created — copy it now, it won't be shown again:</div>
+                         <pre>${data.api_key}</pre>`;
+    loadApiKeys();
+  } catch (e) {
+    display.innerHTML = `<div class="error">${e.message}</div>`;
+  }
+}
+
+async function loadApiKeys() {
+  const list = document.getElementById('apiKeyList');
+  try {
+    const data = await api('GET', '/api/apikeys');
+    list.innerHTML = data.keys.map(k =>
+      `<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px;">
+         <span>${k.label || '(no label)'} ${k.revoked ? '<span class="badge">revoked</span>' : ''}</span>
+         ${k.revoked ? '' : `<button class="secondary" onclick="revokeKey(${k.id})">Revoke</button>`}
+       </div>`
+    ).join('') || '<p style="color:var(--muted); font-size:13px;">No API keys yet.</p>';
+  } catch (e) {
+    list.innerHTML = `<div class="error">${e.message}</div>`;
+  }
+}
+
+async function revokeKey(id) {
+  await api('DELETE', '/api/apikeys/' + id);
+  loadApiKeys();
+}
+
+async function loadUsage() {
+  const el = document.getElementById('usageDisplay');
+  try {
+    const data = await api('GET', '/api/billing/usage');
+    el.innerHTML = `<p>Plan: <strong>${data.plan}</strong></p>
+                    <p>Simulations this month: <strong>${data.simulations_this_month}</strong>
+                       ${data.quota ? ' / ' + data.quota : ' (unlimited)'}</p>`;
+  } catch (e) {
+    el.innerHTML = `<div class="error">${e.message}</div>`;
+  }
+}
+
+if (token) showApp();
+</script>
+</body>
+</html>

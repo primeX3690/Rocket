@@ -182,6 +182,8 @@ def simulate_burn_with_engine_out(
     contingency_time = None
 
     t_hist, r_hist, v_hist, gamma_hist, thrust_hist = [], [], [], [], []
+    warm_guess = None
+    last_target = nominal_target
 
     while t < max_time_s and m > m_dry_kg:
         # Apply engine-out event if its time has arrived
@@ -207,16 +209,27 @@ def simulate_burn_with_engine_out(
                 contingency_time = t
             current_target = new_target
 
+        # A retarget invalidates the previous (A,B,T) solution (it was
+        # solved for a different target), so only carry the warm-start
+        # guess forward across chunks that share the same target —
+        # otherwise each chunk cold-starts and compounding re-solve error
+        # (rather than continuous guidance) is the dominant error source.
+        if current_target is not last_target:
+            warm_guess = None
+            last_target = current_target
+
         # Run one short chunk of guided burn from current state
         chunk = simulate_peg_guided_burn(
             r0_m=r, v0_m_s=v, gamma0_rad=gamma, m0_kg=m,
             thrust_n=thrust, isp_s=isp_s, target=current_target,
             guidance_cycle_s=guidance_cycle_s, dt_integrate=dt_integrate,
-            max_time_s=replan_check_interval_s,
+            max_time_s=replan_check_interval_s, m_dry_kg=m_dry_kg,
+            initial_guess=warm_guess,
         )
 
         if len(chunk["t"]) == 0:
             break  # already at/near cutoff
+        warm_guess = chunk.get("final_guess")
 
         # Advance state to end of this chunk
         r = chunk["final_radius_m"]
@@ -233,10 +246,11 @@ def simulate_burn_with_engine_out(
 
         t += chunk["burn_time_s"]
 
-        # Stop once we're within one integration step of the (possibly
-        # contingency) target — mirrors the cutoff condition inside
-        # simulate_peg_guided_burn itself.
-        if abs(current_target.v_t - v) < 5.0:
+        # Stop once the chunk's own solver reports the burn is complete
+        # (mirrors simulate_peg_guided_burn's own cutoff), or once we're
+        # within a converged solve of the target on all three axes.
+        if chunk.get("burnout") or (chunk.get("solver_converged") and
+           abs(current_target.v_t - v) < 2.0 and abs(current_target.r_t - r) < 200.0):
             break
 
     final_error = {

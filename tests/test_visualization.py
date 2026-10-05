@@ -34,8 +34,9 @@ FAIL = 0
 R_EARTH = 6378137.0
 MU_EARTH = 3.986004418e14
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "visualization", "output")
-os.makedirs(OUT_DIR, exist_ok=True)
+import tempfile
+
+OUT_DIR = tempfile.mkdtemp(prefix="ascentgnc_test_plots_")
 
 
 def check(name, condition):

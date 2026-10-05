@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AscentGNC - Real-Time 3D Attitude Viewer</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0e14; color: #e6edf3; font-family: -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+  #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #hud { position: absolute; top: 12px; left: 12px; background: rgba(20,25,35,0.85); padding: 14px 18px; border-radius: 8px; font-size: 13px; line-height: 1.6; border: 1px solid #2a3441; }
+  #hud b { color: #6ee7ff; }
+  #controls { position: absolute; bottom: 12px; left: 12px; background: rgba(20,25,35,0.85); padding: 12px 16px; border-radius: 8px; border: 1px solid #2a3441; font-size: 13px; }
+  #controls input[type=file] { color: #e6edf3; }
+  #controls button { background: #1f6feb; color: white; border: none; padding: 6px 12px; border-radius: 5px; cursor: pointer; margin-right: 6px; font-size: 13px; }
+  #controls button:hover { background: #388bfd; }
+  #controls button.active { background: #238636; }
+  #timeline { width: 320px; }
+  #status { position: absolute; top: 12px; right: 12px; background: rgba(20,25,35,0.85); padding: 10px 14px; border-radius: 8px; border: 1px solid #2a3441; font-size: 12px; max-width: 280px; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="hud">
+  <div><b>AscentGNC</b> — Real-Time 3D Attitude Viewer</div>
+  <div>Roll: <span id="roll">0.0</span> deg</div>
+  <div>Pitch: <span id="pitch">0.0</span> deg</div>
+  <div>Yaw: <span id="yaw">0.0</span> deg</div>
+  <div>t = <span id="time">0.0</span> s</div>
+</div>
+<div id="controls">
+  <button id="playBtn" class="active">Pause</button>
+  <button id="demoBtn">Demo Trajectory</button>
+  <input type="file" id="fileInput" accept="application/json">
+  <br><br>
+  <input type="range" id="timeline" min="0" max="100" value="0">
+</div>
+<div id="status">
+  Load a JSON file with fields <code>t</code>, <code>quaternion</code> (list of [w,x,y,z] per sample) —
+  exported by any Python module here via <code>navigation/attitude_ekf.py</code>'s <code>ekf.q</code> or
+  <code>dynamics/six_dof.py</code>'s <code>quat_hist</code>. Falls back to a built-in demo tumble if nothing is loaded.
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ---- Scene setup ----
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e14);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(4, 3, 6);
+camera.lookAt(0,0,0);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+container.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x606060));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5,10,7);
+scene.add(dirLight);
+
+// Ground grid for spatial reference
+const grid = new THREE.GridHelper(20, 20, 0x2a3441, 0x1a222c);
+grid.position.y = -2;
+scene.add(grid);
+
+// World axes (fixed, for reference)
+scene.add(new THREE.AxesHelper(3));
+
+// ---- Vehicle model: simple rocket body (cylinder + nose cone + fins) ----
+const vehicle = new THREE.Group();
+const bodyMat = new THREE.MeshStandardMaterial({color:0xcfd8dc, metalness:0.3, roughness:0.5});
+const noseMat = new THREE.MeshStandardMaterial({color:0xff5252, metalness:0.2, roughness:0.6});
+const finMat = new THREE.MeshStandardMaterial({color:0x455a64, metalness:0.2, roughness:0.7});
+
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 24), bodyMat);
+body.rotation.z = Math.PI/2;   // body-x axis becomes the cylinder's long axis
+vehicle.add(body);
+
+const nose = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.7, 24), noseMat);
+nose.rotation.z = -Math.PI/2;
+nose.position.x = 1.55;
+vehicle.add(nose);
+
+for (let i=0;i<4;i++){
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.02,0.35), finMat);
+  fin.position.x = -1.1;
+  const ang = i*Math.PI/2;
+  fin.position.y = Math.cos(ang)*0.35;
+  fin.position.z = Math.sin(ang)*0.35;
+  fin.rotation.x = ang;
+  vehicle.add(fin);
+}
+
+// Body-axis indicator (red=x/thrust, green=y, blue=z)
+vehicle.add(new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 2.2, 0xff3333, 0.15, 0.08));
+vehicle.add(new THREE.ArrowHelper(new THREE.Vector3(0,1,0), new THREE.Vector3(0,0,0), 1.2, 0x33ff33, 0.15, 0.08));
+vehicle.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,1), new THREE.Vector3(0,0,0), 1.2, 0x3388ff, 0.15, 0.08));
+
+scene.add(vehicle);
+
+// ---- Quaternion data: demo tumble by default ----
+let trajectory = null;   // {t: [...], quaternion: [[w,x,y,z], ...]}
+let playing = true;
+let playIndex = 0;
+let demoStartTime = null;
+
+function quatArrayToThree(q) {
+  // Our convention (navigation/attitude_ekf.py, dynamics/six_dof.py): [w, x, y, z]
+  return new THREE.Quaternion(q[1], q[2], q[3], q[0]);
+}
+
+function applyFrame(qArr) {
+  const q = quatArrayToThree(qArr);
+  vehicle.quaternion.copy(q);
+  const euler = new THREE.Euler().setFromQuaternion(q, 'ZYX');
+  document.getElementById('roll').textContent  = (euler.x*180/Math.PI).toFixed(1);
+  document.getElementById('pitch').textContent = (euler.y*180/Math.PI).toFixed(1);
+  document.getElementById('yaw').textContent   = (euler.z*180/Math.PI).toFixed(1);
+}
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  if (trajectory && playing) {
+    const n = trajectory.t.length;
+    playIndex = (playIndex + 1) % n;
+    document.getElementById('timeline').value = (playIndex/n*100).toFixed(0);
+    document.getElementById('time').textContent = trajectory.t[playIndex].toFixed(2);
+    applyFrame(trajectory.quaternion[playIndex]);
+  } else if (!trajectory) {
+    // Built-in demo: a coning/tumbling motion combining pitch and roll oscillation
+    if (demoStartTime === null) demoStartTime = now;
+    const t = (now - demoStartTime)/1000;
+    const pitch = 0.5*Math.sin(t*0.6);
+    const roll = t*0.4;
+    const yaw = 0.15*Math.sin(t*0.3);
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(roll, pitch, yaw, 'ZYX'));
+    vehicle.quaternion.copy(q);
+    document.getElementById('roll').textContent = (roll*180/Math.PI % 360).toFixed(1);
+    document.getElementById('pitch').textContent = (pitch*180/Math.PI).toFixed(1);
+    document.getElementById('yaw').textContent = (yaw*180/Math.PI).toFixed(1);
+    document.getElementById('time').textContent = t.toFixed(2);
+  }
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+
+// ---- Controls ----
+document.getElementById('playBtn').addEventListener('click', (e) => {
+  playing = !playing;
+  e.target.textContent = playing ? 'Pause' : 'Play';
+  e.target.classList.toggle('active', playing);
+});
+
+document.getElementById('demoBtn').addEventListener('click', () => {
+  trajectory = null;
+  demoStartTime = null;
+});
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const data = JSON.parse(evt.target.result);
+      if (!data.t || !data.quaternion) {
+        alert('JSON must have "t" (list of times) and "quaternion" (list of [w,x,y,z]) fields.');
+        return;
+      }
+      trajectory = data;
+      playIndex = 0;
+      document.getElementById('timeline').max = 100;
+    } catch (err) {
+      alert('Failed to parse JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+document.getElementById('timeline').addEventListener('input', (e) => {
+  if (!trajectory) return;
+  playing = false;
+  document.getElementById('playBtn').textContent = 'Play';
+  document.getElementById('playBtn').classList.remove('active');
+  const n = trajectory.t.length;
+  playIndex = Math.floor(e.target.value/100*n);
+  playIndex = Math.min(playIndex, n-1);
+  document.getElementById('time').textContent = trajectory.t[playIndex].toFixed(2);
+  applyFrame(trajectory.quaternion[playIndex]);
+});
+</script>
+</body>
+</html>
