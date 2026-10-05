@@ -1,15 +1,36 @@
-# AscentGNC — Launch-Vehicle Ascent Guidance, Navigation & Control Stack
+AscentGNC — Launch-Vehicle Ascent Guidance, Navigation & Control Stack
 
-Zero-cost, CPU-only, dependency-minimal launch-vehicle ascent GNC stack.
-Companion project to AstroEvo (satellite mission planning) — this one
-covers the rocket/launch-vehicle side: propulsion, guidance, navigation,
-control, fault-tolerance, 6DOF dynamics, and full-mission simulation.
+What this project is:
 
-124 automated tests passing across 13 modules.
+AscentGNC is a launch-vehicle ascent guidance, navigation & control (GNC) software stack — the software layer that decides how a rocket climbs straight, corrects its own path in real time, and — if something onboard fails (a sensor, an engine) — keeps the mission alive instead of letting it crash.
+This is not a rocket itself. 
+It is the brain that would sit inside one: the kind of software that runs on the flight computer of a launch vehicle, the layer that avionics/flight-software teams at companies like Skyroot or Agnikul own and maintain.
+Zero-cost, CPU-only, dependency-minimal (Python + NumPy only) — companion project to AstroEvo (satellite mission planning). Where AstroEvo covers the satellite side, AscentGNC covers the rocket/launch-vehicle side: propulsion, guidance, navigation, control, fault-tolerance, 6DOF dynamics, and full-mission simulation.
+147 automated tests passing across 14 modules, plus a Software-in-the-Loop (SIL) harness that runs the ported control loop on a real ARM Cortex-M3 target under QEMU (see embedded/).
 
-## Folder structure
+Why this exists:
+India's deep-tech space sector (Skyroot, Agnikul) is growing fast, but their GNC stacks are proprietary and closed — there is no open, verifiable, from-scratch reference implementation that shows this kind of software can be built by one self-taught engineer with no lab, no funding, and no formal CS degree. AscentGNC exists to close that gap: as proof of capability, and as a stepping stone toward joining or building a launch-vehicle avionics team.
+Where this is actually useful — real use cases
 
-```
+1. Space launch vehicles (the primary use case).
+Every orbital rocket — from a small sounding rocket to a full PSLV-class vehicle — runs on this category of software: when to gimbal the engine (thrust vector control), when to stage, and how to replan toward an achievable lower orbit instead of a hard failure if an engine goes out mid-flight (this repo's engine_out.py).
+
+2. Satellite deployment / orbit insertion.
+peg.py implements Powered Explicit Guidance, the Apollo/Space Shuttle-heritage closed-loop technique used to insert a payload into its target orbit accurately. Measured result: closed-loop guidance is 1.56x more accurate than open-loop gravity-turn-only guidance at orbit insertion (500-trial Monte Carlo dispersion study, 10.6 m/s std dev vs. 16.5 m/s, and ~3x tighter worst-case 99th-percentile error).
+
+3. Defense / dual-use — stated plainly, not hidden.
+The underlying physics and guidance math of a launch vehicle and a ballistic missile overlap — this is publicly known and is exactly why every civilian rocket-GNC company, Skyroot included, operates under export-control regimes (ITAR/COCOM). This repo models that reality directly: consumer GPS chips enforce a real limit (GPS lock is dropped once altitude exceeds ~18 km AND speed exceeds ~515 m/s simultaneously — the COCOM rule, specifically to keep them from being usable in missile guidance). Being upfront about this dual-use nature, and building the export-control constraint into the simulation itself, is itself a credibility signal for serious aerospace/defense recruiters and investors.
+
+4. Student / amateur high-power rocketry.
+A scaled-down version of this stack is directly usable by college rocketry teams (e.g. Manipal's thrustMIT, IIT Madras's Team Abhyuday) as reference avionics for their own sounding-rocket flight computers.
+
+What makes it different, what makes it advanced:
+Zero-cost, CPU-only. No GPU, no paid aerospace tools (STK/GMAT/MATLAB) — just Python + NumPy, runs entirely on a Ryzen 3 / 8 GB RAM laptop.
+Verified beyond simulation, on real hardware's instruction set. The control loop was ported to C, cross-compiled for the real ARM Cortex-M3 instruction set, and run under QEMU's ARM core emulation — proving it meets its real-time deadline on an actual ~$2 flight computer class chip (STM32-family) with a 99.8% timing margin, not just that the Python model behaves on a laptop CPU.
+Real sensor data, not synthetic guesses. IMU/GPS noise is not an arbitrary constant — it's built from the actual published datasheets of real, buyable parts (MPU-6050, ICM-20602, BMI088 IMUs; u-blox NEO-6M/NEO-M8N GPS).
+Fixes a real, documented failure mode. ISRO's SSLV-D1 mission failure (sensor-fault-triggered hard abort) is fixed in this stack's anomaly_arbitration.py via graceful degradation — not a hypothetical scenario, a real publicly documented mission failure.
+147 automated tests, checked against analytic/textbook closed-form values and public order-of-magnitude reference-mission data — not "looks about right."
+
 ascent-gnc/
 ├── propulsion/
 │   └── rocket_equation.py       # Tsiolkovsky, multi-stage delta-V budgeting, nozzle Isp/thrust
@@ -20,13 +41,20 @@ ascent-gnc/
 │   ├── engine_out.py            # Abort-to-Orbit-style engine-out contingency replanning
 │   └── anomaly_arbitration.py   # Sensor-fault graceful degradation (fixes the SSLV-D1 failure mode)
 ├── navigation/
-│   └── state_estimation.py      # IMU dead-reckoning + Extended Kalman Filter fusion
+│   ├── state_estimation.py      # IMU dead-reckoning + Extended Kalman Filter fusion
+│   └── sensor_datasheets.py     # Real MPU-6050/ICM-20602/BMI088/u-blox datasheet noise models + COCOM GPS limit
 ├── control/
 │   └── tvc_attitude.py          # Thrust Vector Control gimbal loop, analytically-tuned PID
 ├── dynamics/
 │   └── six_dof.py               # Full 6DOF quaternion-based rigid-body dynamics
 ├── faults/
 │   └── real_world.py            # Actuator lag/rate-limits, sensor latency, wind-gust models + compensation
+├── embedded/                    # Software-in-the-Loop: control loop ported to C, run on real ARM
+│   ├── README.md                #   Cortex-M3 (QEMU) — full method + honest caveats
+│   ├── main.c, pid_controller.c/h, startup.c, linker.ld
+│   ├── analyze_trace.py         #   parses the QEMU instruction trace into a timing report
+│   ├── build_and_run.sh         #   one-command reproduction (needs gcc-arm-none-eabi + qemu-system-arm)
+│   └── sample_report.txt        #   a saved run of the above
 ├── analysis/
 │   ├── monte_carlo.py           # Dispersion/reliability analysis, closed-loop vs open-loop comparison
 │   └── mission_profile.py       # Full stage1 -> coast -> stage2 -> orbit-insertion mission chain
@@ -35,49 +63,16 @@ ascent-gnc/
 ├── visualization/
 │   ├── plots.py                 # Matplotlib static plot generators (ascent, PEG, Monte Carlo, 6DOF, etc.)
 │   └── output/                  # Pre-generated PNG plots (already included)
-├── tests/                       # 124 automated tests — one file per module, all runnable standalone
+├── tests/                       # 147 automated tests — one file per module, all runnable standalone
 ├── app.py                       # Interactive Streamlit dashboard (all modules, live sliders)
 ├── requirements.txt
-└── README.md                    # This file
-```
+└── README                       # This file
 
-## Environment setup
 
-Requires Python 3.9+ (tested on 3.12). No GPU needed — runs fine on a
-Ryzen 3 / 8GB RAM laptop.
 
-```bash
-# 1. Extract the zip and enter the project
-unzip ascent-gnc.zip
-cd ascent-gnc
+Running the tests:
+Every test file is self-contained and runnable directly with python3 — no pytest required. Run from the project root.
 
-# 2. (Recommended) create a virtual environment
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-
-# 3. Install dependencies (numpy, matplotlib, streamlit)
-pip install -r requirements.txt
-```
-
-`requirements.txt` contains:
-```
-numpy>=1.24
-matplotlib>=3.7
-streamlit>=1.30
-```
-
-## Running the tests
-
-Every test file is self-contained and runnable directly with `python3`
-— no pytest required. Run from the `ascent-gnc/` project root.
-
-**Run all 124 tests at once:**
-```bash
-for f in tests/test_*.py; do python3 "$f"; done
-```
-
-**Run one module's tests individually:**
-```bash
 python3 tests/test_propulsion.py           # 12 tests
 python3 tests/test_atmosphere.py           # 10 tests
 python3 tests/test_gravity_turn.py         # 11 tests
@@ -91,27 +86,17 @@ python3 tests/test_six_dof.py              # 11 tests
 python3 tests/test_real_world.py           # 10 tests
 python3 tests/test_visualization.py        # 5 tests
 python3 tests/test_anomaly_arbitration.py  # 10 tests
-```
+python3 tests/test_sensor_datasheets.py    # 23 tests
 
-Each file ends with a line like `X passed, 0 failed out of X`.
+Each file ends with a line like X passed, 0 failed out of X.
 
-## Running the interactive dashboard
+Software-in-the-Loop (real ARM Cortex-M3, not just Python)
 
-```bash
-streamlit run app.py
-```
+embedded/ ports the TVC attitude-hold control loop to C, cross-compiles it for the real ARM Cortex-M3 instruction set, and runs it under QEMU's ARM core emulation — proving the compiled control loop fits its real-time budget on real embedded silicon's ISA, not just that the Python model is correct on a laptop CPU. Measured result: ~1703 ARM Thumb-2 instructions/iteration (worst case, no hardware FPU), ~99.8% timing margin on a 72 MHz Cortex-M3. Full method, numbers, and an honest list of what this does/doesn't prove (it's SIL, not full hardware-in-the-loop) are in embedded/README.md.
 
-Opens at `http://localhost:8501` in your browser. Four tabs: ascent
-profile, PEG insertion + engine-out contingency (toggle a failure live),
-Monte Carlo dispersion comparison, and a 6DOF 3D trajectory with thrust
-sliders.
+Regenerating the static plots
+Plots are already included in visualization/output/, but you can regenerate or create new ones:
 
-## Regenerating the static plots
-
-Plots are already included in `visualization/output/`, but you can
-regenerate or create new ones:
-
-```bash
 python3 -c "
 from guidance.gravity_turn import simulate_ascent
 from visualization.plots import plot_ascent_profile
@@ -121,17 +106,12 @@ result = simulate_ascent(m0_kg=50000, m_dry_kg=6000, thrust_n=1200000, isp_s=280
 plot_ascent_profile(result, 'visualization/output/ascent_profile.png')
 print('Saved!')
 "
-```
 
-See `visualization/plots.py` for the other plot functions
-(`plot_peg_insertion`, `plot_monte_carlo_comparison`,
-`plot_six_dof_3d_trajectory`, `plot_realistic_vs_ideal_attitude`).
+
+See visualization/plots.py for the other plot functions (plot_peg_insertion, plot_monte_carlo_comparison, plot_six_dof_3d_trajectory, plot_realistic_vs_ideal_attitude).
 
 ## Using the modules directly
 
-
-
-```python
 # Multi-stage delta-V budget
 from propulsion.rocket_equation import Stage, stage_dv_budget
 s1 = Stage("Stage-1", m_prop=20000, m_struct=2000, isp_s=280.0)
@@ -166,27 +146,9 @@ print("Fallback error:", comparison["sslv_style_fallback"]["velocity_error_m_s"]
 print("Graceful error:", comparison["graceful_degradation"]["velocity_error_m_s"])
 ```
 
+No package install needed — just run scripts from the project root directory (imports are relative to the project root). 
 
 
-No package install needed — just run scripts from the `ascent-gnc/`
-root directory (imports are relative to the project root).
 
-## Module summary
 
-| Module | What it does | Tests |
-|---|---|---|
-| `propulsion/rocket_equation.py` | Delta-V budgeting, nozzle performance | 12 |
-| `guidance/atmosphere.py` | Standard atmosphere model | 10 |
-| `guidance/gravity_turn.py` | Open-loop ascent + max-Q tracking | 11 |
-| `navigation/state_estimation.py` | IMU + EKF fusion | 7 |
-| `control/tvc_attitude.py` | TVC gimbal PID control | 9 |
-| `guidance/peg.py` | Closed-loop orbit insertion | 8 |
-| `analysis/monte_carlo.py` | Dispersion/reliability analysis | 6 |
-| `guidance/engine_out.py` | Engine-out contingency replanning | 11 |
-| `analysis/mission_profile.py` | Full multi-stage mission | 14 |
-| `dynamics/six_dof.py` | 6DOF quaternion rigid-body dynamics | 11 |
-| `faults/real_world.py` | Actuator/sensor/wind realism | 10 |
-| `visualization/plots.py` | Static plot generation | 5 |
-| `guidance/anomaly_arbitration.py` | SSLV-D1 failure-mode fix | 10 |
-| **Total** | | **124** |
 
