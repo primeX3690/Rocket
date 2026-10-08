@@ -16,13 +16,14 @@ no OS), verified on the host.
 | `fsw_telemetry.c/.h`, `fsw_crc.c/.h` | Framed telemetry (`EB 90 | type | seq | len | payload | CRC-16/CCITT`), resynchronising parser safe for a UART RX ISR |
 | `fsw_eskf.c/.h` | **15-state error-state EKF**, C port of `navigation/attitude_ekf.py` (float32 covariance/attitude, **double nominal position/velocity**, no libm/heap, ~2.9 kB RAM). Gravity models: flat (Python-equivalent), central inverse-square with gradient in the covariance, central + J2; velocity-Verlet integration. Adds: NIS innovation gate with lock-out protection, singular-S rejection, health check, accelerometer leveling, decorrelating `reset_pv` for hand-offs |
 | `fsw_frames.c/.h` | Reference frames for orbit-scale navigation: non-rotating, Earth-centred, **pad-aligned inertial frame** (X downrange at the launch azimuth, Z up at the pad), ECEF ↔ inertial with Earth rotation, pad inertial velocity, polar quantities (r, speed, γ, ψ). Uses libm (double) |
+| `fsw_pitch_program.c/.h` | First-stage open-loop pitch table (validated: finite, increasing, slope within the attitude loop's slew limit; held after the end) |
 | `fsw_peg.c/.h` | **PEG predictor-corrector, C port of `guidance/peg.py`** (double precision, uses libm — the only flight source that does). Bit-identical forward prediction and, in converged cases, identical A/B/T_go and iteration counts vs Python. Adds input validation (status codes instead of exceptions/NaN) and a step cap |
 | `fsw_guidance.c/.h` | Runtime around the solver: warm start, cold retry, previous-solution fallback, withdrawal after repeated failures, seqlock publication (heavy solve in a low-priority task, cheap lock-free read in the 50 Hz cycle), θ(t) / time-to-go / cutoff / insertion-window helpers |
 | `fsw_math.c/.h` | sqrt/sin/cos/atan2/asin without libm (abs error 3e-6 … 2e-5, measured against libm) |
 | `fsw_core.c/.h` | One deterministic cycle: 3×IMU (3-axis accel+gyro) → FDIR on all 6 axes → votes → state machine → pad alignment / ESKF → TVC PID → gimbal → telemetry → watchdog |
 | `fsw_hal.h` | The **only** hardware interface (4 callbacks). Body frame: +Z axial/up on the pad, pitch about +Y |
 | `port/hal_stm32_template.c` | Shape of a real-board port (**template, not compiled/tested**) |
-| `test/fsw_selftest.c` | 210 checks: unit tests + 26 closed-loop scenarios (real ESKF incl. ECI mode, real guidance, 3-D inertial truth) |
+| `test/fsw_selftest.c` | 227 checks: unit tests + 28 closed-loop scenario groups (real ESKF incl. ECI mode, real guidance, atmosphere/drag/staging, 3-D inertial truth) |
 
 Run: `cd flight_software && make test` (needs only gcc/clang; `-lm` is used by the
 *test* only). Also wired into `python3 run_all_tests.py` via
@@ -45,6 +46,40 @@ IMUs dead on the pad (arm refused) · engine fails to start · premature
 cutoff · ground abort in flight and on the pad · slow **gyro** drift (must not
 leak into the ESKF) · 400 m GPS outlier · no GPS at all · corrupted filter
 covariance in flight (→ abort, gimbal centred).
+
+## Full ascent, pad to orbit (Scenario 20) — the headline result
+
+An **illustrative** two-stage vehicle (not any real launcher): S1 520 kN vac / 290 s, 19 t propellant; S2 60 kN / 335 s,
+5.6 t; 150 kg payload; 2.0 m² reference area; US-1976-style density/pressure/sound-speed tables, Mach-dependent Cd,
+drag relative to the co-rotating air, thrust reduced by back-pressure, mass depletion, S1 dry-mass jettison, 3-D
+inertial truth with J2. **No hand-off shortcut**: pad alignment → liftoff → pitch table (S1) → staging → PEG from the
+ECI filter's own polar state (S2) → guidance-commanded cutoff → insertion judged on the filter.
+
+| Result (nominal) | Value |
+|---|---|
+| MECO | t = 105.0 s |
+| Max dynamic pressure | 53.7 kPa at 54 s, 10.7 km, Mach 1.79; max AoA 4.8° |
+| Peak specific force | 5.9 g (accelerometer range 20 g) |
+| Drag loss | 102 m/s |
+| S2 ignition | 55.8 km, burn 292.7 s, cutoff commanded by guidance, 254 kg propellant left |
+| **TRUE orbit** | **199.5 × 211.1 km** (target 200 km circular), speed error +3.4 m/s, γ −0.015° |
+| Guidance | 145 solves, 145 converged, 0 degraded, 0 failed |
+| Filter vs truth at insertion | r +0.6 m, v +0.063 m/s, γ −0.0002° |
+| Navigation error over the whole ascent | max 6.4 m / 1.78 m/s |
+
+Dispersions and faults (Scenario 21): **engines 4 % weak on both stages → 200.1 × 211.2 km, inserted**; IMU frozen at
+t = 60 s → 199.6 × 211.2 km, inserted; **GNSS lost for the last ~250 s → 159 × 243 km, navigation error 10.4 km / 56 m/s**
+(MEMS-class IMU cannot hold a long thrusting burn alone; the filter's own 1σ was 74 km, i.e. it knew).
+
+Things this scenario found (fixed): the guided-stage mass from a fuel-gauge model made a 4 %-weak engine look like a
+lighter vehicle and cut off 45 m/s short (now effective mass `F_nominal / a_measured`, which is what PEG's dynamics
+actually depend on); the core kept re-solving in the last 2 s of the burn where PEG is ill-conditioned (one degraded
+solve, orbit 199.7 × 221.8 km) — now frozen like `guidance/peg.py`'s own simulator (orbit 198.6 × 204.5 km).
+
+Limits of the model, all real: zero-lift aerodynamics (no wind, no normal force, no aero moments, no bending/slosh);
+no fairing jettison; the attitude plant is a pitch-axis toy (rigid body, thrust-vector torque only, no RCS: the large
+pitch-over after staging is flown with TVC at the slew limit); vehicle numbers are invented but plausible; one pitch
+table is used for all dispersions (no day-of-launch biasing).
 
 ## Orbit-scale (inertial) navigation: `cfg.nav_eci = 1`
 
@@ -69,10 +104,9 @@ covariance in flight (→ abort, gimbal centred).
   TRUE insertion error r −8 m, v +4.15 m/s, γ −0.004° (the 4 m/s is J2, which PEG's point-mass model does not
   contain; the filter's own J2 setting does not change it).
 - **Caveats, all real:**
-  - The orbital hand-off in the guided test is a **harness shortcut** (truth jumps to a hand-off state; the filter
-    is set to it ± 11 m / 0.1 m/s with a decorrelated covariance). The toy first stage cannot fly to that state, so
-    the closed-loop test does not prove the filter through a real S1→S2 trajectory. The first-stage ECI run
-    (Scenario 17) is separate and unguided.
+  - Scenario 18's orbital hand-off is a **harness shortcut** (truth jumps to a hand-off state; the filter is set
+    to it ± 11 m / 0.1 m/s with a decorrelated covariance). It is superseded by Scenario 20, which flies the real
+    first stage to the hand-off with no shortcut; Scenario 18 is kept because it isolates guidance + filter.
   - Spherical Earth (geocentric = geodetic latitude): the ellipsoid is a ~21 km / 0.2° effect to add before
     flying. Gravity is point mass + J2 only; atmospheric drag needs no model (it is in the accelerometers).
   - ψ and PEG assume the motion stays near the launch-azimuth plane; a dog-leg or a launch azimuth other than the
@@ -141,6 +175,12 @@ covariance in flight (→ abort, gimbal centred).
   `fsw_eskf_predict` is ~2×15³ ≈ 6.8 k multiply-adds (analytic estimate, **not
   measured on a target**) — a Cortex-M4F should fit in a 20 ms frame with large
   margin, but verify on the board.
+
+## Test-infrastructure defect (fixed)
+
+The ctypes/subprocess C-wrapper tests treated a **compile/link error as "no compiler found" and SKIPPED** (reporting
+0 passed, 0 failed), so a broken build would have looked green. Now only a genuinely missing compiler skips; a build
+error fails. Verified by deliberately breaking a source file.
 
 ## Defects found and fixed in the ECI pass (all pinned by tests)
 

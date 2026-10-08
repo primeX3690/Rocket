@@ -42,8 +42,10 @@ def build_lib():
             subprocess.run([cc, "-std=c99", "-O2", "-shared", "-fPIC", "-I", FSW, "-o", lib] + srcs,
                            check=True, capture_output=True)
             return lib
-        except (FileNotFoundError, subprocess.CalledProcessError):
+        except FileNotFoundError:
             continue
+        except subprocess.CalledProcessError as e:      # a compiler exists and the code does not build: that is a FAILURE
+            raise RuntimeError("fsw_eskf.c failed to build:\n" + e.stderr.decode()[-1500:])
     return None
 
 

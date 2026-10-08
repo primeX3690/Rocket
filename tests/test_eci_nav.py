@@ -47,8 +47,10 @@ def load():
             subprocess.run([cc, "-std=c99", "-O2", "-shared", "-fPIC", "-I", FSW, "-o", lib_path] + srcs + ["-lm"],
                            check=True, capture_output=True)
             break
-        except (FileNotFoundError, subprocess.CalledProcessError):
+        except FileNotFoundError:
             continue
+        except subprocess.CalledProcessError as e:      # compiler present, code does not build: FAILURE, not skip
+            raise RuntimeError("ECI navigation sources failed to build:\n" + e.stderr.decode()[-1500:])
     else:
         return None
     lib = ctypes.CDLL(lib_path)

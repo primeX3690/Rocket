@@ -52,8 +52,10 @@ def run_c(kp, ki, kd, cmd_step=0.05):
     try:
         subprocess.run(["gcc", "-O2", "-shared", "-fPIC", "-o", lib_path, src],
                        check=True, capture_output=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
+    except FileNotFoundError:
+        return None                                     # no compiler: skip
+    except subprocess.CalledProcessError as e:          # compiler present, code does not build: FAILURE
+        raise RuntimeError("embedded/pid_controller.c failed to build:\n" + e.stderr.decode()[-1500:])
     lib = ctypes.CDLL(lib_path)
 
     class P(ctypes.Structure):

@@ -28,6 +28,7 @@
 #include "fsw_eskf.h"
 #include "fsw_guidance.h"
 #include "fsw_frames.h"
+#include "fsw_pitch_program.h"
 #include "../embedded/pid_controller.h"
 
 #define FSW_TASK_SENSORS  (1u << 0)
@@ -76,6 +77,7 @@ typedef struct {
     float                gps_default_latency_s;   /* age assumed by fsw_core_gps_fix(); 0 = fix is fresh */
     float                pad_gyro_bias_tau_s;     /* gyro bias averaging time constant on the pad */
     float                pad_rest_rate_rps;       /* only average bias while |w| below this */
+    uint8_t              mass_from_accel;         /* ECI + guidance: guided-stage mass from the measured specific force (default 1), else the fuel-gauge model */
     float                att_sigma_rollpitch_rad; /* 1-sigma attitude uncertainty at liftoff: leveling accuracy (averaged accelerometer) */
     float                att_sigma_yaw_rad;       /* ... azimuth: not observable on the pad; comes from the pad survey */
     /* ---- orbit-scale (inertial) navigation: nav_eci = 1 ----
@@ -112,6 +114,8 @@ typedef struct {
     double            polar_stamp_s;
     uint8_t           polar_valid;
     double            last_guid_req_s;
+    fsw_pitch_program_t pprog;                      /* first-stage open-loop pitch table (optional) */
+    uint32_t          liftoff_cycle;
     uint8_t           guid_request, guid_flags, cutoff_sent;
     uint32_t          guid_serviced;
     float             pad_q[4], pad_bg[3], pad_f[3];
@@ -123,6 +127,8 @@ typedef struct {
     uint8_t           gps_is_ecef;
     fsw_site_t        site;
     double            stage2_m0_kg, mass_est_kg;   /* mass model for the polar state (see fsw_core_set_stage2_mass) */
+    double            s2_accel_lp;                 /* low-passed guided-stage axial specific force */
+    uint8_t           s2_accel_seeded;
     uint8_t           gps_pending;
     double            nav_pos_hist[FSW_GPS_HIST][3];   /* post-predict position of nav cycle n at [n % FSW_GPS_HIST] */
     uint32_t          nav_cycles;                       /* index of the newest stored entry */
@@ -158,6 +164,11 @@ void fsw_core_set_pitch_cmd(fsw_core_t *c, float pitch_rad);   /* external pitch
  *
  * fsw_core_guidance_service: HEAVY (one PEG solve). Call from a low-priority task / idle loop,
  * NEVER from the control interrupt. It only does work when the control cycle has requested a solve. */
+/* First-stage steering: a pitch-vs-time table, flown from liftoff through ASCENT_S1 and STAGE_SEP, and held as
+ * the fallback in ASCENT_S2 if guidance has no valid solution. Returns 0 on success (see fsw_pitch_program_set;
+ * the slew limit of the attitude loop is used as the maximum slope). With no table the external pitch command
+ * (fsw_core_set_pitch_cmd) is used as before. */
+int  fsw_core_set_pitch_program(fsw_core_t *c, const float *t_s, const float *phi_rad, int n);
 void fsw_core_attach_guidance(fsw_core_t *c, fsw_guidance_t *g);
 void fsw_core_set_polar_state(fsw_core_t *c, double r_m, double v_mps, double gamma_rad, double mass_kg, double psi_rad);
 void fsw_core_guidance_service(fsw_core_t *c);
@@ -181,9 +192,11 @@ void fsw_core_gps_fix(fsw_core_t *c, const float pos_m[3]);
  * cycle is 154 m, so rounding the age to a whole cycle is not good enough), and then proceeds as
  * fsw_core_gps_fix_aged(). In flat mode this is dropped, and the flat variants are dropped in ECI mode. */
 void fsw_core_gps_fix_ecef(fsw_core_t *c, const double ecef_m[3], float age_s);
-/* ECI mode: initial mass of the guided stage. The polar state's mass is m0 - mdot*(time since thrust was
- * confirmed), mdot from the attached guidance's thrust and Isp (a fuel-gauge model: thrust/Isp error shows up
- * as mass error). Without guidance attached no polar state is derived. */
+/* ECI mode: initial mass of the guided stage. The polar state's mass is, by default, the EFFECTIVE mass
+ * m_eff = F_nominal / a_measured (low-passed axial specific force): PEG's dynamics only depend on F/m, so this
+ * absorbs a thrust dispersion that a fuel-gauge model (m0 - mdot*t) turns into a ~4 % mass error and an early
+ * cutoff (measured: 4 % weak engines -> 45 m/s short with the gauge model). cfg.mass_from_accel = 0 selects
+ * the gauge model. Without guidance attached no polar state is derived. */
 void fsw_core_set_stage2_mass(fsw_core_t *c, double m0_kg);
 
 void fsw_core_step(fsw_core_t *c);

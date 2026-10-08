@@ -2,6 +2,7 @@
 #include "fsw_telemetry.h"
 #include "fsw_math.h"
 #include "fsw_peg.h"
+#include "fsw_pitch_program.h"
 #include <string.h>
 
 static float fsw_nan(void)
@@ -73,6 +74,7 @@ void fsw_core_default_cfg(fsw_core_cfg_t *cfg)
     cfg->pitch_cmd_rate_limit_rps = 0.1f;      /* 5.7 deg/s */
     cfg->guid_state_max_age_s = 1.0f;
     cfg->pad_rest_rate_rps = 0.05f;
+    cfg->mass_from_accel = 1;
     cfg->att_sigma_rollpitch_rad = 2.0e-3f;
     cfg->att_sigma_yaw_rad = 1.0e-2f;
     cfg->nav_eci = 0;
@@ -117,6 +119,11 @@ void fsw_core_cmd_launch(fsw_core_t *c)  { c->in.cmd_launch = 1; }
 void fsw_core_cmd_abort(fsw_core_t *c)   { c->in.cmd_abort = 1; }
 void fsw_core_set_insertion_ok(fsw_core_t *c, int ok) { c->in.insertion_ok = (uint8_t)(ok != 0); }
 void fsw_core_set_pitch_cmd(fsw_core_t *c, float r)   { c->pitch_cmd_ext = r; }
+
+int fsw_core_set_pitch_program(fsw_core_t *c, const float *t_s, const float *phi_rad, int n)
+{
+    return fsw_pitch_program_set(&c->pprog, t_s, phi_rad, n, c->cfg.pitch_cmd_rate_limit_rps);
+}
 
 void fsw_core_attach_guidance(fsw_core_t *c, fsw_guidance_t *g)
 {
@@ -460,6 +467,16 @@ void fsw_core_step(fsw_core_t *c)
                 if (prev_mode == FSW_ASCENT_S2 && c->stage2_m0_kg > 0.0) {
                     double burnt = c->st.thrust_seen ? ((double)c->st.t_burn_s + (double)c->cfg.state.confirm_ticks * (double)c->cfg.dt_s) : 0.0;
                     c->mass_est_kg = c->stage2_m0_kg - c->guid->mdot * burnt;
+                    if (c->cfg.mass_from_accel && c->st.thrust_seen && c->acc_vote[FSW_AXIS_AXIAL].n_used >= 1u) {
+                        double a_ax = (double)c->acc_vote[FSW_AXIS_AXIAL].value, alpha = (double)c->cfg.dt_s / 1.5;
+                        if (!c->s2_accel_seeded) { c->s2_accel_lp = a_ax; c->s2_accel_seeded = 1; }
+                        else { c->s2_accel_lp += alpha * (a_ax - c->s2_accel_lp); }
+                        if (c->s2_accel_lp > 1.0) {
+                            double m_eff = c->guid->cfg.thrust_n / c->s2_accel_lp;
+                            /* sanity: must be a physical mass for this stage, else keep the gauge value */
+                            if (m_eff > c->guid->cfg.m_dry_kg && m_eff < 1.5 * c->stage2_m0_kg) { c->mass_est_kg = m_eff; }
+                        }
+                    }
                 }
                 {
                     double pr, pv, pg, ppsi;
@@ -515,6 +532,7 @@ void fsw_core_step(fsw_core_t *c)
             fsw_eskf_set_P_diag(&c->nav, 11, v);
         }
         c->nav_active = 1;
+        c->liftoff_cycle = c->cycle;
         c->nav_ok = 1;
         c->nav_bad_count = 0;
         c->gps_pending = 0;
@@ -527,6 +545,9 @@ void fsw_core_step(fsw_core_t *c)
     {
         float target = c->pitch_cmd_ext;
         double t_now = (double)c->cycle * (double)c->cfg.dt_s;
+        if (c->pprog.n > 0 && c->nav_active) {
+            target = fsw_pitch_program_eval(&c->pprog, (float)((double)(c->cycle - c->liftoff_cycle) * (double)c->cfg.dt_s));
+        }
         if (c->guid != 0) {
             fsw_guid_solution_t tmp;
             uint8_t gf = (uint8_t)(c->guid_flags & (FSW_GUID_ATTACHED | FSW_GUID_CUTOFF_SENT | FSW_GUID_INSERTED));   /* these latch */
@@ -543,7 +564,12 @@ void fsw_core_step(fsw_core_t *c)
                 }
                 if (!fresh) { gf |= FSW_GUID_STALE_STATE; }
                 if (!c->cutoff_sent) {
-                    if (fresh && !c->guid_request && (t_now - c->last_guid_req_s) >= c->guid->cfg.cycle_s) {
+                    /* Terminal freeze (as in guidance/peg.py's burn simulator): once T_go <= one solve cycle the problem is
+                     * ill-conditioned (the last solves were not converging) and a re-solve can only add noise: fly the last
+                     * solution to cutoff. Before the first solution exists (ttg < 0) solving is always allowed. */
+                    double ttg_now = fsw_guid_time_to_go(&c->guid_cache, t_now);
+                    int frozen = (ttg_now >= 0.0 && ttg_now <= c->guid->cfg.cycle_s);
+                    if (fresh && !frozen && !c->guid_request && (t_now - c->last_guid_req_s) >= c->guid->cfg.cycle_s) {
                         c->guid_request = 1;
                         c->last_guid_req_s = t_now;
                     }

@@ -458,6 +458,41 @@ static void test_guidance_unit(void)
 
 /* ======================= Part B: closed-loop scenarios ======================= */
 
+
+/* ---- US-Standard-Atmosphere-1976 style tables (density, pressure, speed of sound), log-linear interpolation ---- */
+static const double ATM_H[] = {0,1,2,3,4,5,6,8,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,150,200,300};          /* km */
+static const double ATM_RHO[] = {1.225,1.112,1.007,0.9093,0.8194,0.7364,0.6601,0.5258,0.4135,0.3119,0.2279,0.1665,0.1216,0.08891,0.03995,0.01841,0.008463,0.003996,0.001966,0.001027,3.097e-4,8.28e-5,1.846e-5,3.416e-6,5.604e-7,2.222e-8,2.076e-9,2.5e-10,1.9e-11};
+static const double ATM_P[] = {101325,89876,79501,70121,61660,54048,47217,35651,26499,19399,14170,10353,7565,5529,2549,1197,574.6,287.1,149.1,79.8,21.96,5.22,1.052,0.1836,0.032,0.0025,0.0005,1e-4,1e-5};
+static const double ATM_A[] = {340.3,336.4,332.5,328.6,324.6,320.5,316.5,308.1,299.5,295.1,295.1,295.1,295.1,295.1,298.4,301.7,305.8,317.2,325.0,329.8,315.1,297.1,282.5,282.5,284.6,330,380,420,480};
+#define ATM_N 29
+static double atm_log(double h_m, const double *tab)
+{
+    double hk = h_m / 1000.0;
+    int i;
+    if (hk <= ATM_H[0]) return tab[0];
+    if (hk >= ATM_H[ATM_N - 1]) return tab[ATM_N - 1];
+    for (i = 1; i < ATM_N; i++) if (hk <= ATM_H[i]) break;
+    { double f = (hk - ATM_H[i - 1]) / (ATM_H[i] - ATM_H[i - 1]);
+      return exp(log(tab[i - 1]) + f * (log(tab[i]) - log(tab[i - 1]))); }
+}
+static double atm_a(double h_m) { /* speed of sound: linear (not log) */
+    double hk = h_m / 1000.0; int i;
+    if (hk <= ATM_H[0]) return ATM_A[0];
+    if (hk >= ATM_H[ATM_N - 1]) return ATM_A[ATM_N - 1];
+    for (i = 1; i < ATM_N; i++) if (hk <= ATM_H[i]) break;
+    return ATM_A[i - 1] + (hk - ATM_H[i - 1]) / (ATM_H[i] - ATM_H[i - 1]) * (ATM_A[i] - ATM_A[i - 1]);
+}
+/* drag coefficient vs Mach (generic slender body: transonic rise, supersonic decay) */
+static double cd_of_mach(double m)
+{
+    static const double M[] = {0, 0.8, 1.0, 1.2, 2.0, 3.0, 5.0, 10.0}, C[] = {0.28, 0.30, 0.52, 0.50, 0.38, 0.30, 0.24, 0.22};
+    int i;
+    if (m <= M[0]) return C[0];
+    if (m >= M[7]) return C[7];
+    for (i = 1; i < 8; i++) if (m <= M[i]) break;
+    return C[i - 1] + (m - M[i - 1]) / (M[i] - M[i - 1]) * (C[i] - C[i - 1]);
+}
+
 typedef enum { IMU_OK = 0, IMU_STUCK, IMU_SPIKE, IMU_DEAD, IMU_BURST, IMU_DRIFT, IMU_GYRO_DRIFT } imu_mode_t;
 
 typedef struct {
@@ -540,6 +575,17 @@ typedef struct {
     double gps_age_error_s;         /* wrongly reported part of the fix age (receiver timing error) */
     double tp_hist[64][3];          /* truth position at the start of each cycle (for fixes measured between cycles) */
     uint32_t cycle_L;
+    /* ---- full two-stage ascent: atmosphere, drag, mass, staging (illustrative vehicle, NOT any real launcher) ---- */
+    int ascent;
+    double S1_dry, S1_prop0, S1_T, S1_isp, S1_Ae, S2_dry, S2_prop0, S2_T, S2_isp, payload, area;
+    double s1_scale, s2_scale;      /* thrust (and mass flow) dispersion factors */
+    double m_tot, prop1, prop2;
+    int a_s1_on, a_s2_on, sep_done, s1_burnout, s2_cut;
+    double t_meco, t_s2ign, t_s2cut;
+    double f_body[3], a_nong[3];    /* specific force in the body frame; thrust+drag acceleration in the inertial frame */
+    double q_max, q_max_t, q_max_alt, q_max_mach, max_spec_force, max_alpha_deg;
+    double meco_alt, meco_speed, meco_gamma, s2_ign_alt;
+    double drag_loss_dv;            /* integral of drag/m */
 } sim_t;
 
 static void (*g_cfg_hook)(fsw_core_cfg_t *) = 0;
@@ -556,6 +602,7 @@ static int flight_started(const sim_t *s) { return s->e1_start >= 0 && s->t >= s
 static float truth_axial_accel(const sim_t *s)
 {
     double t = s->t;
+    if (s->ascent) return (float)s->f_body[2];
     if (s->guided && s->pm_started) return s->pm_engine ? (float)(s->pm_F_true / s->pm.m) : 0.1f;
     if (s->e2_start >= 0 && t >= s->e2_start && t < s->e2_end) return (float)(12.0 + 1.0 * (t - s->e2_start));
     if (s->e2_start >= 0 && t >= s->e2_end)                     return 0.1f;
@@ -566,6 +613,7 @@ static float truth_axial_accel(const sim_t *s)
 
 static int engine_on(const sim_t *s)
 {
+    if (s->ascent) return s->a_s1_on || s->a_s2_on;
     if (s->guided && s->pm_started) return s->pm_engine;
     return (s->e1_start >= 0 && s->t >= s->e1_start && s->t < s->e1_end) ||
            (s->e2_start >= 0 && s->t >= s->e2_start && s->t < s->e2_end);
@@ -581,6 +629,8 @@ static void truth_specific_force(const sim_t *s, float f[3])
         f[0] = (float)(-G0 * sin(th));
         f[1] = 0.0f;
         f[2] = (float)(G0 * cos(th));
+    } else if (s->ascent) {
+        f[0] = (float)s->f_body[0]; f[1] = (float)s->f_body[1]; f[2] = (float)s->f_body[2];
     } else {
         f[0] = 0.0f; f[1] = 0.0f; f[2] = truth_axial_accel(s);
     }
@@ -638,6 +688,7 @@ static void hal_kick(void *ctx) { ((sim_t *)ctx)->kicks++; }
 static void hal_engine_cutoff(void *ctx)
 {
     sim_t *s = (sim_t *)ctx;
+    if (s->ascent) { if (s->a_s2_on) { s->a_s2_on = 0; s->s2_cut = 1; s->pm_cut_by_cmd = 1; s->t_s2cut = s->t; } return; }
     if (s->pm_engine) { s->pm_engine = 0; s->pm_cut_by_cmd = 1; s->pm_cut_t = s->t; }
 }
 static size_t hal_tlm(void *ctx, const uint8_t *b, size_t n)
@@ -676,6 +727,56 @@ static void sim_start_tilted(sim_t *s, double tilt)
     s->dyn.pitch = (float)tilt;
 }
 
+
+static void ascent_prepare(sim_t *s)
+{
+    double p[3], v[3], w[3], vrel[3], r, h, rho, pa, a, sp, q, mach, D, thr = 0.0, phi, zb[3], xb[3], Fd[3];
+    int k;
+    if (s->eci_started) { for (k = 0; k < 3; k++) { p[k] = s->tpI[k]; v[k] = s->tvI[k]; } }
+    else fsw_site_pad_state(&g_site, p, v);
+    if (s->e1_start >= 0 && s->t >= s->e1_start && !s->s1_burnout && s->prop1 > 0.0) s->a_s1_on = 1;
+    if (s->e2_start >= 0 && s->t >= s->e2_start && s->sep_done && !s->s2_cut && s->prop2 > 0.0) {
+        if (!s->a_s2_on && s->t_s2ign == 0.0) { s->t_s2ign = s->t; s->s2_ign_alt = sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]) - 6378137.0; }
+        s->a_s2_on = 1;
+    }
+    r = sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]); h = r - 6378137.0;
+    for (k = 0; k < 3; k++) w[k] = FSW_OMEGA_EARTH * g_site.axis[k];
+    vrel[0] = v[0] - (w[1]*p[2] - w[2]*p[1]);
+    vrel[1] = v[1] - (w[2]*p[0] - w[0]*p[2]);
+    vrel[2] = v[2] - (w[0]*p[1] - w[1]*p[0]);                   /* velocity relative to the co-rotating air */
+    sp = sqrt(vrel[0]*vrel[0] + vrel[1]*vrel[1] + vrel[2]*vrel[2]);
+    rho = atm_log(h, ATM_RHO); pa = atm_log(h, ATM_P); a = atm_a(h);
+    mach = sp / a; q = 0.5 * rho * sp * sp; D = q * cd_of_mach(mach) * s->area;
+    if (s->a_s1_on) thr = s->s1_scale * s->S1_T - pa * s->S1_Ae;
+    if (s->a_s2_on) thr = s->s2_scale * s->S2_T;
+    phi = (double)s->dyn.pitch;
+    zb[0] = sin(phi); zb[1] = 0.0; zb[2] = cos(phi);
+    xb[0] = cos(phi); xb[1] = 0.0; xb[2] = -sin(phi);
+    for (k = 0; k < 3; k++) Fd[k] = (sp > 1e-3) ? -D * vrel[k] / sp : 0.0;
+    s->f_body[0] = (Fd[0]*xb[0] + Fd[1]*xb[1] + Fd[2]*xb[2]) / s->m_tot;
+    s->f_body[1] = Fd[1] / s->m_tot;
+    s->f_body[2] = (thr + Fd[0]*zb[0] + Fd[1]*zb[1] + Fd[2]*zb[2]) / s->m_tot;
+    for (k = 0; k < 3; k++) s->a_nong[k] = (thr * zb[k] + Fd[k]) / s->m_tot;
+    if (s->eci_started) {
+        double alpha = 0.0;
+        if (sp > 50.0) { double cosang = (vrel[0]*zb[0] + vrel[2]*zb[2]) / sp; if (cosang > 1.0) cosang = 1.0; alpha = acos(cosang) * 57.29578; }
+        if (q > s->q_max) { s->q_max = q; s->q_max_t = s->t; s->q_max_alt = h; s->q_max_mach = mach; }
+        if (s->f_body[2] > s->max_spec_force) s->max_spec_force = s->f_body[2];
+        if (s->a_s1_on && alpha > s->max_alpha_deg) s->max_alpha_deg = alpha;
+        s->drag_loss_dv += D / s->m_tot * 0.02;
+    }
+}
+
+static void ascent_after_step(sim_t *s, fsw_mode_t after)
+{
+    double dm = 0.0;
+    if (s->a_s1_on) { dm = s->s1_scale * s->S1_T / (s->S1_isp * FSW_PEG_G0) * 0.02; s->prop1 -= dm; s->m_tot -= dm;
+        if (s->prop1 <= 0.0) { s->a_s1_on = 0; s->s1_burnout = 1; s->t_meco = s->t; s->e1_end = s->t; } }
+    if (s->a_s2_on) { dm = s->s2_scale * s->S2_T / (s->S2_isp * FSW_PEG_G0) * 0.02; s->prop2 -= dm; s->m_tot -= dm;
+        if (s->prop2 <= 0.0) { s->a_s2_on = 0; s->s2_cut = 1; s->pm_depleted = 1; s->t_s2cut = s->t; } }
+    if (after == FSW_STAGE_SEP && !s->sep_done) { s->m_tot -= s->S1_dry; s->sep_done = 1; }
+}
+
 static void sim_run(sim_t *s, double t_end)
 {
     const float dt = 0.02f;
@@ -686,12 +787,12 @@ static void sim_run(sim_t *s, double t_end)
         /* engines light only when the flight software commands it */
         if (before == FSW_IGNITION && s->e1_start < 0 && !s->engine1_no_start) {
             s->e1_start = s->t + 0.4;
-            s->e1_end = s->e1_start + (s->engine1_cut_after_s > 0 ? s->engine1_cut_after_s : s->burn1_s);
+            s->e1_end = s->ascent ? 1e9 : s->e1_start + (s->engine1_cut_after_s > 0 ? s->engine1_cut_after_s : s->burn1_s);
         }
         if (before == FSW_ASCENT_S2 && s->e2_start < 0) {
             s->e2_start = s->t + 0.3;
             s->e2_end = s->e2_start + s->burn2_s;
-            if (s->guided) {              /* hand-off state for the upper-stage burn (arbitrary, not the toy S1's) */
+            if (s->guided && !s->ascent) {              /* hand-off state for the upper-stage burn (arbitrary, not the toy S1's) */
                 s->pm.r = 6378137.0 + 180000.0; s->pm.v = 6000.0; s->pm.gamma = 3.0 * 3.14159265358979 / 180.0; s->pm.m = 4000.0;
                 s->psi = 0.0; s->pm_started = 1; s->pm_ign_t = s->e2_start;
                 if (s->eci) {
@@ -720,8 +821,9 @@ static void sim_run(sim_t *s, double t_end)
         if (!s->armed_sent && s->t >= 0.2) { fsw_core_cmd_arm(&s->core); s->armed_sent = 1; }
         if (!s->launch_sent && s->launch_at_s >= 0 && s->t >= s->launch_at_s) { fsw_core_cmd_launch(&s->core); s->launch_sent = 1; }
         if (!s->abort_sent && s->abort_at_s >= 0 && s->t >= s->abort_at_s) { fsw_core_cmd_abort(&s->core); s->abort_sent = 1; }
-        if (before == FSW_COAST && !s->guided) { s->coast_t += dt; if (s->coast_t > 3.0) fsw_core_set_insertion_ok(&s->core, 1); }
-        if (s->guided) fsw_core_set_pitch_cmd(&s->core, (s->t >= 3.0) ? (float)s->phi_program : 0.0f);   /* external pitch program */
+        if (before == FSW_COAST && !s->guided && !s->ascent) { s->coast_t += dt; if (s->coast_t > 3.0) fsw_core_set_insertion_ok(&s->core, 1); }
+        if (s->ascent) { /* steering comes from the core's pitch table (S1) and guidance (S2) */ }
+        else if (s->guided) fsw_core_set_pitch_cmd(&s->core, (s->t >= 3.0) ? (float)s->phi_program : 0.0f);   /* external pitch program */
         else           fsw_core_set_pitch_cmd(&s->core, (s->t >= 5.0) ? 0.05f : 0.0f);
         if (s->guided && s->pm_started && !s->eci) {     /* navigation -> guidance bridge (truth + injected nav error) */
             int dropped = (s->polar_dropout_at_s >= 0 && s->t >= s->polar_dropout_at_s);
@@ -775,9 +877,10 @@ static void sim_run(sim_t *s, double t_end)
             }
         }
 
+        if (s->ascent) ascent_prepare(s);
         truth = truth_axial_accel(s);
         fsw_core_step(&s->core);
-        if (s->guided) {                                  /* the heavy solve runs OUTSIDE the control step */
+        if (s->guided || s->ascent) {                     /* the heavy solve runs OUTSIDE the control step */
             clock_t c0 = clock();
             uint32_t before_n = s->core.guid_serviced;
             fsw_core_guidance_service(&s->core);
@@ -826,6 +929,7 @@ static void sim_run(sim_t *s, double t_end)
                 if (e > s->max_track_err) s->max_track_err = e;
             }
         }
+        if (s->ascent) ascent_after_step(s, after);
         gimbal_actual = actuator_step(&s->act, s->last_gimbal, dt);
         thrust = engine_on(s) ? 2000000.0f : 0.0f;
         dist = engine_on(s) ? one_minus_cosine_gust((float)s->t, 3.0f, 2.0f, 20000.0f) : 0.0f;
@@ -848,6 +952,7 @@ static void sim_run(sim_t *s, double t_end)
         if (s->eci && s->eci_started && s->t >= s->t_L - 1e-9) {
             /* RK4 in the inertial frame; thrust acceleration along the body +Z axis, held over the step */
             double fa = truth, th = s->dyn.pitch, tb[3] = { sin(th) * fa, 0.0, cos(th) * fa };
+            if (s->ascent) { tb[0] = s->a_nong[0]; tb[1] = s->a_nong[1]; tb[2] = s->a_nong[2]; }
             double mu = FSW_PEG_MU_EARTH, j2 = 1.08262668e-3, req = 6378137.0, ax[3];
             double k1p[3], k1v[3], k2p[3], k2v[3], k3p[3], k3v[3], k4p[3], k4v[3], pp[3], vv[3];
             int k, st;
@@ -1470,6 +1575,118 @@ static void test_eci_gps(void)
     CHECK("at orbital speed a 10 ms error in the reported age is clearly visible (error >= 3x larger): GPS time-tagging needs ms accuracy", e_off > 3.0 * e_exact);
 }
 
+/* ======================= full two-stage ascent: pad -> orbit, no hand-off shortcut ======================= */
+
+static const float ASC_T[]   = { 0, 8, 10.5f, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110 };
+static const float ASC_PHI[] = { 0, 0, 0.12f, 0.1264f, 0.1888f, 0.317f, 0.4378f, 0.5457f, 0.6378f, 0.7137f, 0.7751f, 0.8244f, 0.8639f, 0.89f };
+
+static void ascent_setup(sim_t *s)
+{
+    fsw_guidance_cfg_t gc;
+    double r = 6378137.0 + 200000.0;
+    g_cfg_hook = eci_cfg;
+    sim_init(s);
+    g_cfg_hook = 0;
+    s->eci = 1; s->j2_in_truth = 1; s->ascent = 1;
+    s->S1_dry = 2500.0; s->S1_prop0 = 19000.0; s->S1_T = 520e3; s->S1_isp = 290.0; s->S1_Ae = 0.9;
+    s->S2_dry = 700.0;  s->S2_prop0 = 5600.0;  s->S2_T = 60e3;  s->S2_isp = 335.0;
+    s->payload = 150.0; s->area = 2.0106; s->s1_scale = 1.0; s->s2_scale = 1.0;
+    s->m_tot = s->S1_dry + s->S1_prop0 + s->S2_dry + s->S2_prop0 + s->payload;
+    s->prop1 = s->S1_prop0; s->prop2 = s->S2_prop0;
+    s->launch_at_s = 0.6;
+    fsw_guidance_default_cfg(&gc);
+    gc.target.r_t = r; gc.target.v_t = sqrt(FSW_PEG_MU_EARTH / r); gc.target.gamma_t = 0.0;
+    gc.thrust_n = s->S2_T; gc.isp_s = s->S2_isp; gc.m_dry_kg = s->S2_dry + s->payload;      /* the guidance's NOMINAL model */
+    fsw_guidance_init(&s->guid, &gc);
+    fsw_core_attach_guidance(&s->core, &s->guid);
+    fsw_core_set_stage2_mass(&s->core, s->S2_dry + s->S2_prop0 + s->payload);
+    (void)fsw_core_set_pitch_program(&s->core, ASC_T, ASC_PHI, 14);
+}
+
+static void true_orbit(const sim_t *s, double *peri_km, double *apo_km, double *r_km_alt, double *v, double *gam)
+{
+    double r = sqrt(s->tpI[0]*s->tpI[0] + s->tpI[1]*s->tpI[1] + s->tpI[2]*s->tpI[2]);
+    double vv = sqrt(s->tvI[0]*s->tvI[0] + s->tvI[1]*s->tvI[1] + s->tvI[2]*s->tvI[2]);
+    double E = 0.5 * vv * vv - FSW_PEG_MU_EARTH / r, a = -FSW_PEG_MU_EARTH / (2.0 * E);
+    double hx = s->tpI[1]*s->tvI[2] - s->tpI[2]*s->tvI[1], hy = s->tpI[2]*s->tvI[0] - s->tpI[0]*s->tvI[2], hz = s->tpI[0]*s->tvI[1] - s->tpI[1]*s->tvI[0];
+    double h2 = hx*hx + hy*hy + hz*hz, e2 = 1.0 + 2.0 * E * h2 / (FSW_PEG_MU_EARTH * FSW_PEG_MU_EARTH), e = (e2 > 0.0) ? sqrt(e2) : 0.0;
+    double vr = (s->tpI[0]*s->tvI[0] + s->tpI[1]*s->tvI[1] + s->tpI[2]*s->tvI[2]) / r;
+    *peri_km = (a * (1.0 - e) - 6378137.0) / 1000.0; *apo_km = (a * (1.0 + e) - 6378137.0) / 1000.0;
+    *r_km_alt = (r - 6378137.0) / 1000.0; *v = vv; *gam = asin(vr / vv);
+}
+
+static void test_full_ascent(void)
+{
+    static const fsw_mode_t seq[] = { FSW_PAD_SAFE, FSW_PAD_ARMED, FSW_IGNITION, FSW_ASCENT_S1,
+                                      FSW_STAGE_SEP, FSW_ASCENT_S2, FSW_COAST, FSW_ORBIT_INSERTED };
+    double peri, apo, alt, v, g, nr, nv, ng, npsi, tr, tv, tg, tpsi;
+    printf("Scenario 20: FULL ascent pad -> 200 km orbit: atmosphere + drag + staging + ECI navigation + pitch table + PEG (no hand-off shortcut)\n");
+    ascent_setup(&S);
+    sim_run(&S, 520.0);
+    true_orbit(&S, &peri, &apo, &alt, &v, &g);
+    fsw_polar_from_inertial(S.core.nav.p, S.core.nav.v, &nr, &nv, &ng, &npsi);
+    truth_polar(&S, &tr, &tv, &tg, &tpsi);
+    printf("     S1: MECO t=%.1f s | max-Q %.1f kPa at t=%.0f s (alt %.1f km, Mach %.2f) | peak specific force %.1f m/s^2 | drag loss %.0f m/s | max AoA %.2f deg\n",
+           S.t_meco, S.q_max / 1000.0, S.q_max_t, S.q_max_alt / 1000.0, S.q_max_mach, S.max_spec_force, S.drag_loss_dv, S.max_alpha_deg);
+    printf("     S2: ignition at alt %.1f km | cutoff by guidance at t=%.1f s (burn %.1f s) | propellant left %.0f kg | solves %u, converged %u, degraded %u, failed %u\n",
+           S.s2_ign_alt / 1000.0, S.t_s2cut, S.t_s2cut - S.t_s2ign, S.prop2, S.guid.solves, S.guid.converged, S.guid.degraded, S.guid.failed);
+    printf("     TRUE orbit: %.1f x %.1f km | final alt %.1f km, speed err %+.2f m/s, gamma %+.4f deg | filter vs truth: r %+.1f m, v %+.3f m/s, gamma %+.4f deg\n",
+           peri, apo, alt, v - S.guid.cfg.target.v_t, g * 57.29578, nr - tr, nv - tv, (ng - tg) * 57.29578);
+    printf("     navigation vs truth over the whole ascent (after 10 s): max |dp| %.1f m, max |dv| %.2f m/s | pitch-estimate max err %.4f rad\n", S.max_pos3_after10, S.max_vel3_after10, S.max_pitch_est_err);
+    CHECK("mode sequence PAD_SAFE ... ORBIT_INSERTED", visited_is(&S, seq, 8));
+    CHECK("first stage burns to propellant depletion (MECO ~104 s) and separates", S.s1_burnout && S.sep_done && fabs(S.t_meco - 104.0) < 6.0);
+    CHECK("max dynamic pressure is realistic (30-80 kPa), transonic-to-supersonic, near zero angle of attack", S.q_max > 30e3 && S.q_max < 80e3 && S.q_max_mach > 1.0 && S.max_alpha_deg < 6.0);
+    CHECK("peak specific force < 7 g (the accelerometer range is 20 g)", S.max_spec_force < 7.0 * 9.80665);
+    CHECK("second stage ignites in near-vacuum (> 45 km)", S.s2_ign_alt > 45000.0);
+    CHECK("main engine cut by the GUIDANCE command (T_go expiry), not by propellant depletion", S.pm_cut_by_cmd && !S.pm_depleted && S.core.cutoff_sent);
+    CHECK("TRUE orbit: perigee and apogee within 185-225 km (target 200 km circular)", peri > 185.0 && peri < 225.0 && apo > 185.0 && apo < 225.0);
+    CHECK("TRUE insertion: |v error| < 15 m/s and |gamma| < 0.5 deg", fabs(v - S.guid.cfg.target.v_t) < 15.0 && fabs(g) < 0.0087);
+    CHECK("insertion declared from the filter-derived polar state; vehicle ends ORBIT_INSERTED", (S.core.guid_flags & FSW_GUID_INSERTED) != 0 && S.core.st.mode == FSW_ORBIT_INSERTED);
+    CHECK("filter polar state at the end within 60 m / 1 m/s / 0.02 deg of truth", fabs(nr - tr) < 60.0 && fabs(nv - tv) < 1.0 && fabs(ng - tg) < 3.5e-4);
+    CHECK("guidance converged on every solve it ran, none failed", S.guid.failed == 0 && S.guid.degraded == 0 && S.guid.solves >= 130);
+    CHECK("no filter fault, no watchdog trip, no sensor-fault flags through the whole ascent", (S.core.fault_flags & (FSW_FLAG_NAV_FAULT | FSW_FLAG_WDG_TRIPPED)) == 0 && S.ever_fault_flags == 0);
+}
+
+static void test_ascent_dispersions(void)
+{
+    double peri, apo, alt, v, g;
+    printf("Scenario 21: full-ascent dispersions and faults\n");
+
+    ascent_setup(&S);
+    S.s1_scale = 0.96; S.s2_scale = 0.96;                 /* engines 4 % weak; guidance's model still assumes nominal thrust */
+    sim_run(&S, 560.0);
+    true_orbit(&S, &peri, &apo, &alt, &v, &g);
+    printf("     21a thrust -4 %% both stages: MECO %.1f s, burn %.1f s, TRUE orbit %.1f x %.1f km, v err %+.2f m/s, gamma %+.3f deg, propellant left %.0f kg, mode %d\n",
+           S.t_meco, S.t_s2cut - S.t_s2ign, peri, apo, v - S.guid.cfg.target.v_t, g * 57.29578, S.prop2, S.core.st.mode);
+    CHECK("21a: still reaches orbit (185-230 km window) with 4 % low thrust on both stages, cut by guidance", peri > 185.0 && apo < 230.0 && S.pm_cut_by_cmd && S.core.st.mode == FSW_ORBIT_INSERTED);
+
+    ascent_setup(&S);
+    S.imu[1].mode = IMU_STUCK; S.imu[1].t_on = 60.0;       /* an IMU freezes just after max-Q */
+    sim_run(&S, 520.0);
+    true_orbit(&S, &peri, &apo, &alt, &v, &g);
+    printf("     21b IMU 1 frozen at t=60 s: TRUE orbit %.1f x %.1f km, flags ever raised %02x, final votes accel %d / gyro %d, mode %d\n",
+           peri, apo, S.ever_fault_flags, S.core.acc_vote[2].n_used, S.core.gyr_vote[1].n_used, S.core.st.mode);
+    CHECK("21b: frozen IMU detected, voted out, ascent unaffected (orbit window, ORBIT_INSERTED)", (S.ever_fault_flags & FSW_FLAG_IMU1_FAULT) != 0 && peri > 185.0 && apo < 225.0 && S.core.st.mode == FSW_ORBIT_INSERTED);
+
+    ascent_setup(&S);
+    S.gps_delay_s = 0.0;
+    sim_run(&S, 150.0);
+    S.gps_enabled = 0;                                      /* GNSS lost at t=150 s: pure inertial for the rest of the second stage */
+    sim_run(&S, 520.0);
+    true_orbit(&S, &peri, &apo, &alt, &v, &g);
+    printf("     21c GPS lost at t=150 s (inertial for the remaining ~250 s of burn): TRUE orbit %.1f x %.1f km, v err %+.2f m/s, nav error at end: %.1f m, %.2f m/s, mode %d\n",
+           peri, apo, v - S.guid.cfg.target.v_t,
+           sqrt(pow(S.core.nav.p[0]-S.tpI[0],2)+pow(S.core.nav.p[1]-S.tpI[1],2)+pow(S.core.nav.p[2]-S.tpI[2],2)),
+           sqrt(pow(S.core.nav.v[0]-S.tvI[0],2)+pow(S.core.nav.v[1]-S.tvI[1],2)+pow(S.core.nav.v[2]-S.tvI[2],2)), S.core.st.mode);
+    {
+        double sig_p = sqrt((double)(S.core.nav.P[6][6] + S.core.nav.P[7][7] + S.core.nav.P[8][8]));
+        printf("     21c filter's own position uncertainty at the end: %.0f m (1-sigma, 3 axes) vs actual error above\n", sig_p);
+        CHECK("21c: a MEMS-class IMU cannot hold a 250 s thrusting burn without GNSS (real effect, no true bias in the sim: the residual bias ESTIMATE integrates): error is km-scale but bounded < 20 km / 100 m/s", S.max_pos3 < 20000.0 && S.max_vel3 < 100.0);
+        CHECK("21c: the filter KNOWS it is lost: its own 1-sigma position uncertainty at the end is > 1 km (honest covariance)", sig_p > 1000.0);
+        CHECK("21c: an orbit still results (perigee > 100 km: not suborbital), but it is NOT on target (perigee < 185 km): the number to quote when asked about GNSS loss", peri > 100.0 && peri < 185.0);
+    }
+}
+
 int main(void)
 {
     printf("== AscentGNC flight_software self-test ==\n");
@@ -1498,6 +1715,8 @@ int main(void)
     test_eci_nominal();
     test_eci_guided();
     test_eci_gps();
+    test_full_ascent();
+    test_ascent_dispersions();
     printf("%d passed, %d failed out of %d\n", g_pass, g_fail, g_pass + g_fail);
     return g_fail == 0 ? 0 : 1;
 }
