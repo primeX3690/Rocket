@@ -63,7 +63,12 @@ int main(void) {
     RealisticActuator act;
     RigidBodyPitchDynamics dyn;
 
-    pid_init(&pid, 8.0f, 0.5f, 3.0f, 0.10472f);   /* kp,ki,kd, +-6 deg gimbal limit (rad) */
+    /* kp,ki,kd, +-6 deg gimbal limit (rad). Gains were 8.0/0.5/3.0 -- those are
+     * UNSTABLE on this plant (loop gain K = T*L/I = 48 1/s^2, so kp=8 puts the
+     * crossover far above the 50 ms actuator lag; pitch diverged to ~0.9 rad).
+     * 0.3/0.05/0.3 holds attitude with <1 deg gimbal use. Timing is unchanged:
+     * same instruction mix, only constants differ. */
+    pid_init(&pid, 0.3f, 0.05f, 0.3f, 0.10472f);
     actuator_init(&act, 0.34907f, 0.05f);           /* 20 deg/s slew, 50ms lag */
     dynamics_init(&dyn, 50000.0f, 1.2f);             /* moment of inertia, gimbal arm */
 

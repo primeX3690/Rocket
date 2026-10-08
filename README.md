@@ -6,7 +6,7 @@ AscentGNC is a launch-vehicle ascent guidance, navigation & control (GNC) softwa
 This is not a rocket itself. 
 It is the brain that would sit inside one: the kind of software that runs on the flight computer of a launch vehicle, the layer that avionics/flight-software teams at companies like Skyroot or Agnikul own and maintain.
 Zero-cost, CPU-only, dependency-light (NumPy for the physics; Matplotlib + Streamlit only for the optional plots/dashboard).
-180 automated tests passing across 19 modules (run with `python3 run_all_tests.py`), plus a Software-in-the-Loop (SIL) harness that runs the ported control loop on a real ARM Cortex-M3 target under QEMU (see embedded/), and a Python<->C numerical-equivalence test (tests/test_embedded_c_equivalence.py) that verifies the C port actually matches the Python reference, not just that both run.
+479 automated tests passing across 31 test files (run with `python3 run_all_tests.py`), plus a Software-in-the-Loop (SIL) harness that runs the ported control loop on a real ARM Cortex-M3 target under QEMU (see embedded/), and a Python<->C numerical-equivalence test (tests/test_embedded_c_equivalence.py) that verifies the C port actually matches the Python reference, not just that both run.
 
 Why this exists:
 India's deep-tech space sector (Skyroot, Agnikul) is growing fast, but their GNC stacks are proprietary and closed — there is no open, verifiable, from-scratch reference implementation that shows this kind of software can be built by one self-taught engineer with no lab, no funding, and no formal CS degree. AscentGNC exists to close that gap: as proof of capability, and as a stepping stone toward joining or building a launch-vehicle avionics team.
@@ -29,7 +29,7 @@ Zero-cost, CPU-only. No GPU, no paid aerospace tools (STK/GMAT/MATLAB) — just 
 Verified beyond simulation, on real hardware's instruction set. The control loop was ported to C, cross-compiled for the real ARM Cortex-M3 instruction set, and run under QEMU's ARM core emulation — proving it meets its real-time deadline on an actual ~$2 flight computer class chip (STM32-family) with a 99.8% timing margin, not just that the Python model behaves on a laptop CPU.
 Real sensor data, not synthetic guesses. IMU/GPS noise is not an arbitrary constant — it's built from the actual published datasheets of real, buyable parts (MPU-6050, ICM-20602, BMI088 IMUs; u-blox NEO-6M/NEO-M8N GPS).
 Models a real, documented failure mode. ISRO's SSLV-D1 mission failure (a transient accelerometer fault triggering a permanent, full open-loop guidance fallback) is reproduced in anomaly_arbitration.py -- a real fault is injected into a real sensor channel, run through an online detector, and the SSLV-D1-style permanent-freeze response is directly compared against isolating only the bad samples while staying closed-loop. Not a hypothetical scenario, and not asserted -- simulated end to end.
-180 automated tests, checked against analytic/textbook closed-form values (vis-viva, conservation of angular momentum/energy during coast, quaternion orthonormality) and public order-of-magnitude reference-mission data — not "looks about right."
+479 automated tests, checked against analytic/textbook closed-form values (vis-viva, conservation of angular momentum/energy during coast, quaternion orthonormality) and public order-of-magnitude reference-mission data — not "looks about right."
 
 ascent-gnc/
 ├── propulsion/
@@ -66,7 +66,7 @@ ascent-gnc/
 ├── visualization/
 │   ├── plots.py                 # Matplotlib static plot generators (ascent, PEG, Monte Carlo, 6DOF, etc.)
 │   └── output/                  # Pre-generated PNG plots (already included)
-├── tests/                       # 180 automated tests — one file per module, all runnable standalone
+├── tests/                       # 479 automated tests — one file per module, all runnable standalone
 ├── run_all_tests.py              # Runs every tests/test_*.py and prints a combined pass/fail summary
 ├── app.py                       # Interactive Streamlit dashboard (all modules, live sliders)
 ├── requirements.txt
@@ -98,7 +98,7 @@ python3 tests/test_attitude_ekf.py         # 10 tests
 python3 tests/test_reference_vehicle.py    # 7 tests
 python3 tests/test_embedded_c_equivalence.py  # 4 tests (needs a host C compiler; skips gracefully without one)
 
-Each file ends with a line like X passed, 0 failed out of X (180 total).
+Each file ends with a line like X passed, 0 failed out of X (479 total).
 
 Software-in-the-Loop (real ARM Cortex-M3, not just Python)
 
@@ -297,3 +297,7 @@ Tested in `tests/test_reusability.py` (43 tests, including a from-
 scratch re-derivation check of the ZEM/ZEV law against a direct
 double-integrator simulation) — 329/329 tests pass in total across 25
 files (`python3 run_all_tests.py`).
+
+## Flight-software layer (C) — `flight_software/`
+
+Board-independent C99 flight software: 3-IMU FDIR with debounce/recovery and voting, a measured-evidence flight-mode state machine with abort logic, a task-liveness watchdog, and a CRC-framed telemetry link, including a **float32 C port of the 15-state ESKF** and a **double-precision C port of the PEG guidance solver** (both numerically checked against the Python originals), GPS latency compensation, a PEG-guided upper-stage burn flown closed-loop in simulation (insertion within 6 m / 0.03 m/s), and an **orbit-scale inertial navigation mode** (Earth-centred pad-aligned frame, J2 gravity, ECEF fixes with Earth rotation and latency handling) that feeds guidance its polar state (filter-derived polar state within 1 m / 0.01 m/s of truth; NEES 4.0 vs ~6 expected); 210 host checks including 26 closed-loop scenarios (ASan/UBSan clean). Host-tested only — **not yet run on hardware**; see `flight_software/README.md` for exact scope and the defects fixed in this pass (notably: the SIL harness's old TVC gains were unstable).

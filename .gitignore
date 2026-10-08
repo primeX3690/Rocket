@@ -13,3 +13,5 @@ embedded/*.bin
 embedded/*.o
 embedded/build/
 .DS_Store
+flight_software/build/
+*.o
